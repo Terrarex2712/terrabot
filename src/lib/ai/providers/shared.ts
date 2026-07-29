@@ -1,4 +1,10 @@
-import { AiError, type AiUsage, type ChatMessage } from '../types'
+import {
+  AiError,
+  type AiTool,
+  type AiUsage,
+  type ChatMessage,
+  type ToolCallValidator,
+} from '../types'
 
 // ============================================================
 // Bits shared by the OpenAI + Anthropic adapters.
@@ -10,6 +16,13 @@ export interface ProviderArgs {
   systemPrompt: string
   messages: ChatMessage[]
   timeoutMs: number
+  /** Tools the model may call instead of replying in plain text.
+   *  Only the Anthropic adapter currently acts on this — see its own
+   *  file for the documented v1 scope (OpenAI ignores it). */
+  tools?: AiTool[]
+  /** Validates a tool call locally (no DB round trip) so an invalid
+   *  call can be fed back to the model as a tool-result error. */
+  validateToolUse?: ToolCallValidator
 }
 
 /**
@@ -34,6 +47,20 @@ export function normalizeUsage(raw: {
     return null
   }
   return { promptTokens, completionTokens, totalTokens }
+}
+
+/**
+ * Add two usage readings together, null-safe. Used to report total spend
+ * across a tool-call validation retry (two provider calls, one logical
+ * generation).
+ */
+export function sumUsage(a: AiUsage | null, b: AiUsage | null): AiUsage | null {
+  if (!a && !b) return null
+  return {
+    promptTokens: (a?.promptTokens ?? 0) + (b?.promptTokens ?? 0),
+    completionTokens: (a?.completionTokens ?? 0) + (b?.completionTokens ?? 0),
+    totalTokens: (a?.totalTokens ?? 0) + (b?.totalTokens ?? 0),
+  }
 }
 
 /** Map a fetch rejection (timeout / DNS / offline) to a typed AiError. */

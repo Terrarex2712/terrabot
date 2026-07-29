@@ -39,7 +39,7 @@ export interface SendButtonsNodeConfig {
   /** Optional header / footer lines around the buttons. */
   header_text?: string;
   footer_text?: string;
-  /** 1-3 buttons; Meta cap enforced in meta-api validation. */
+  /** 1-3 buttons; cap enforced in aisensy-api validation. */
   buttons: Array<{
     /** Stable id sent back by Meta when this button is tapped. */
     reply_id: string;
@@ -56,7 +56,7 @@ export interface SendListNodeConfig {
   button_label: string;
   header_text?: string;
   footer_text?: string;
-  /** 1-10 rows TOTAL across sections; cap enforced in meta-api. */
+  /** 1-10 rows TOTAL across sections; cap enforced in aisensy-api. */
   sections: Array<{
     title?: string;
     rows: Array<{

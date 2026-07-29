@@ -1,14 +1,12 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
+import { sendTemplateMessage } from '@/lib/whatsapp/aisensy-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard'
 import {
   sanitizePhoneForMeta,
   isValidE164,
-  phoneVariants,
-  isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import {
   checkRateLimit,
@@ -150,7 +148,7 @@ export async function POST(request: Request) {
       )
     }
 
-    const accessToken = decrypt(config.access_token)
+    const apiKey = decrypt(config.api_key)
 
     // Load the template row once so sendTemplateMessage can build
     // header + button components on each iteration. Loading inside
@@ -192,37 +190,23 @@ export async function POST(request: Request) {
         continue
       }
 
-      // Retry with phone variants on "not in allowed list" so numbers
-      // that differ only in a trunk-prefix 0 still reach recipients.
-      const variants = phoneVariants(sanitized)
       let sentMessageId: string | null = null
       let lastError: string | null = null
 
-      for (const variant of variants) {
-        try {
-          const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
-            to: variant,
-            templateName: template_name,
-            language: template_language || 'en_US',
-            template: templateRow ?? undefined,
-            messageParams: recipient.messageParams,
-            params: recipient.params ?? [],
-          })
-          sentMessageId = result.messageId
-          lastError = null
-          break
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error'
-          if (!isRecipientNotAllowedError(errorMessage)) {
-            lastError = errorMessage
-            break
-          }
-          lastError = errorMessage
-          // retry with next variant
-        }
+      try {
+        const result = await sendTemplateMessage({
+          projectId: config.project_id,
+          apiKey,
+          to: sanitized,
+          templateName: template_name,
+          language: template_language || 'en_US',
+          template: templateRow ?? undefined,
+          messageParams: recipient.messageParams,
+          params: recipient.params ?? [],
+        })
+        sentMessageId = result.messageId
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : 'Unknown error'
       }
 
       if (sentMessageId) {

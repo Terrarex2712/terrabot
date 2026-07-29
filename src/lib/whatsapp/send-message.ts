@@ -6,7 +6,7 @@
 // Given a conversation and message params, this:
 //   1. validates the params for the message type,
 //   2. loads the conversation + contact + WhatsApp config,
-//   3. sends to Meta (with phone-variant retry + contact auto-fix),
+//   3. sends via AiSensy,
 //   4. persists the message + updates the conversation,
 //   5. pauses any active Flow run for the contact (agent stepped in).
 //
@@ -16,7 +16,7 @@
 // their respective response shapes (internal `{ error }` vs the v1
 // envelope). Behaviour is identical to the original inline route —
 // this is a straight extraction so the public endpoint can reuse it
-// without duplicating ~250 lines of Meta plumbing.
+// without duplicating the AiSensy plumbing.
 // ============================================================
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -28,7 +28,7 @@ import {
   sendInteractiveButtons,
   sendInteractiveList,
   type MediaKind,
-} from '@/lib/whatsapp/meta-api';
+} from '@/lib/whatsapp/aisensy-api';
 import {
   validateInteractivePayload,
   interactivePayloadPreviewText,
@@ -39,8 +39,6 @@ import { supabaseAdmin } from '@/lib/flows/admin-client';
 import {
   sanitizePhoneForMeta,
   isValidE164,
-  phoneVariants,
-  isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import type { MessageTemplate } from '@/types';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
@@ -262,18 +260,18 @@ export async function sendMessageToConversation(
     );
   }
 
-  const accessToken = decrypt(config.access_token);
+  const apiKey = decrypt(config.api_key);
 
   // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
-  if (isLegacyFormat(config.access_token)) {
+  if (isLegacyFormat(config.api_key)) {
     void db
       .from('whatsapp_config')
-      .update({ access_token: encrypt(accessToken) })
+      .update({ api_key: encrypt(apiKey) })
       .eq('id', config.id)
       .then(({ error }: { error: { message: string } | null }) => {
         if (error) {
           console.warn(
-            '[send-message] access_token GCM upgrade failed:',
+            '[send-message] api_key GCM upgrade failed:',
             error.message
           );
         }
@@ -332,8 +330,8 @@ export async function sendMessageToConversation(
   const attempt = async (phone: string): Promise<string> => {
     if (messageType === 'template') {
       const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        projectId: config.project_id,
+        apiKey,
         to: phone,
         templateName: templateName!,
         language: templateLanguage || 'en_US',
@@ -346,8 +344,8 @@ export async function sendMessageToConversation(
     }
     if (isMediaKind) {
       const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        projectId: config.project_id,
+        apiKey,
         to: phone,
         kind: messageType as MediaKind,
         link: mediaUrl!,
@@ -361,8 +359,8 @@ export async function sendMessageToConversation(
       const p = interactivePayload!;
       if (p.kind === 'buttons') {
         const result = await sendInteractiveButtons({
-          phoneNumberId: config.phone_number_id,
-          accessToken,
+          projectId: config.project_id,
+          apiKey,
           to: phone,
           bodyText: p.body,
           headerText: p.header || undefined,
@@ -373,8 +371,8 @@ export async function sendMessageToConversation(
         return result.messageId;
       }
       const result = await sendInteractiveList({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        projectId: config.project_id,
+        apiKey,
         to: phone,
         bodyText: p.body,
         buttonLabel: p.button_label,
@@ -386,8 +384,8 @@ export async function sendMessageToConversation(
       return result.messageId;
     }
     const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      projectId: config.project_id,
+      apiKey,
       to: phone,
       text: contentText!,
       contextMessageId,
@@ -395,49 +393,15 @@ export async function sendMessageToConversation(
     return result.messageId;
   };
 
-  // Send via Meta — retry across phone-number variants if Meta rejects
-  // with "recipient not in allowed list"; persist a working variant
-  // back to the contact so the next send goes straight through.
-  let waMessageId = '';
-  let workingPhone = sanitizedPhone;
+  // Send via AiSensy.
+  let waMessageId: string;
   try {
-    const variants = phoneVariants(sanitizedPhone);
-    let lastError: unknown = null;
-
-    for (const variant of variants) {
-      try {
-        waMessageId = await attempt(variant);
-        workingPhone = variant;
-        lastError = null;
-        break;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!isRecipientNotAllowedError(message)) {
-          throw err;
-        }
-        lastError = err;
-        console.warn(
-          `[send-message] variant "${variant}" rejected by Meta, trying next…`
-        );
-      }
-    }
-
-    if (lastError) throw lastError;
+    waMessageId = await attempt(sanitizedPhone);
   } catch (err) {
     const message =
-      err instanceof Error ? err.message : 'Unknown Meta API error';
-    console.error('[send-message] Meta send failed for all variants:', message);
-    throw new SendMessageError('meta_error', `Meta API error: ${message}`, 502);
-  }
-
-  if (workingPhone !== sanitizedPhone) {
-    console.log(
-      `[send-message] Auto-corrected contact phone: ${sanitizedPhone} → ${workingPhone}`
-    );
-    await db
-      .from('contacts')
-      .update({ phone: workingPhone })
-      .eq('id', contact.id);
+      err instanceof Error ? err.message : 'Unknown AiSensy API error';
+    console.error('[send-message] AiSensy send failed:', message);
+    throw new SendMessageError('aisensy_error', `AiSensy API error: ${message}`, 502);
   }
 
   // Persist the sent message. Field names MUST match the messages

@@ -269,22 +269,10 @@ export interface MessageReaction {
 export interface WhatsAppConfig {
   id: string;
   user_id: string;
-  phone_number_id: string;
-  waba_id?: string;
-  access_token: string;
-  verify_token?: string;
+  project_id: string;
+  api_key: string;
   status: 'connected' | 'disconnected';
   connected_at?: string;
-  /**
-   * Set when POST /{phone_number_id}/register last succeeded. NULL
-   * means the number was saved but never actually subscribed for
-   * webhooks on Meta's side — inbound events will be silently lost.
-   */
-  registered_at?: string;
-  /** Set when POST /{waba_id}/subscribed_apps last succeeded. */
-  subscribed_apps_at?: string;
-  /** Last error from /register; cleared on success. */
-  last_registration_error?: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)

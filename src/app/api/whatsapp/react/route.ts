@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
+import { sendReactionMessage } from '@/lib/whatsapp/aisensy-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
 import {
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     // WhatsApp config + access token. Account-scoped post-multi-user.
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
-      .select('phone_number_id, access_token')
+      .select('project_id, api_key')
       .eq('account_id', accountId)
       .single();
 
@@ -122,23 +122,23 @@ export async function POST(request: Request) {
       );
     }
 
-    const accessToken = decrypt(config.access_token);
+    const apiKey = decrypt(config.api_key);
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
 
     try {
       await sendReactionMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        projectId: config.project_id,
+        apiKey,
         to: sanitizedPhone,
         targetMessageId: targetMessage.message_id,
         emoji,
       });
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : 'Unknown Meta API error';
-      console.error('[whatsapp/react] Meta send failed:', message);
+        err instanceof Error ? err.message : 'Unknown AiSensy API error';
+      console.error('[whatsapp/react] AiSensy send failed:', message);
       return NextResponse.json(
-        { error: `Meta API error: ${message}` },
+        { error: `AiSensy API error: ${message}` },
         { status: 502 },
       );
     }

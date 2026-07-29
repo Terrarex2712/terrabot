@@ -54,8 +54,11 @@ export function buildSystemPrompt(args: {
   mode: 'draft' | 'auto_reply'
   /** Knowledge-base excerpts retrieved for the current question. */
   knowledge?: string[]
+  /** True when the account has an approved-template tool on offer for
+   *  this call (auto-reply mode only — see `src/lib/ai/templates.ts`). */
+  templatesAvailable?: boolean
 }): string {
-  const { userPrompt, mode, knowledge } = args
+  const { userPrompt, mode, knowledge, templatesAvailable } = args
   const parts: string[] = [
     'You are a customer-messaging assistant for a business that uses a WhatsApp CRM. ' +
       'You are shown the recent WhatsApp conversation between the business (assistant) and a customer (user). ' +
@@ -70,6 +73,12 @@ export function buildSystemPrompt(args: {
     parts.push(
       `You are replying automatically with no human in the loop. If you cannot confidently and safely help — the customer explicitly asks for a human, is upset or complaining, or the request needs information you do not have — reply with exactly ${HANDOFF_SENTINEL} and nothing else. A human agent will then take over. Prefer handing off over guessing.`,
     )
+    if (templatesAvailable) {
+      parts.push(
+        'You also have a tool for sending one of the business\'s pre-approved WhatsApp templates instead of free text. ' +
+          'Only use it when a template is a clear, exact match for the request — prefer a normal free-text reply otherwise.',
+      )
+    }
   }
 
   if (userPrompt && userPrompt.trim()) {

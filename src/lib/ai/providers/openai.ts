@@ -23,6 +23,11 @@ interface OpenAiResponse {
  * Call OpenAI's Chat Completions endpoint with the caller's own key.
  * Returns the raw assistant text + token usage (handoff parsing happens
  * in `generateReply`).
+ *
+ * Tool-calling (template selection) isn't wired up for this provider —
+ * `args.tools`/`args.validateToolUse` are accepted upstream but never
+ * reach here. Documented v1 gap: OpenAI accounts stay free-text-only
+ * until this adapter gains the same tool-use handling as Anthropic's.
  */
 export async function generateOpenAi(args: ProviderArgs): Promise<ProviderResult> {
   const { apiKey, model, systemPrompt, messages, timeoutMs } = args

@@ -1,12 +1,14 @@
 /**
- * Build the Meta `components` array used by POST /{phone_number_id}/messages
- * when sending an APPROVED template.
+ * Build the `components` array used by POST /project/{project_id}/messages
+ * when sending an APPROVED template — confirmed identical to Meta's own
+ * shape, which this AiSensy endpoint proxies closely.
  *
- * Distinct from `template-components.ts` — that module builds the
- * `components` for TEMPLATE CREATION (where you describe headers,
- * footers, buttons, examples). This module builds the per-send
- * `components` (where you fill in variable values and supply the
- * actual media link or button URL suffix for THIS specific delivery).
+ * This module builds the per-send `components` (fill in variable
+ * values, supply the actual media link or button URL suffix for THIS
+ * specific delivery). Template *creation* — where you'd describe
+ * headers/footers/buttons/examples — has no equivalent here anymore:
+ * templates are dashboard-managed on AiSensy's side (see
+ * templates/sync/route.ts).
  *
  * Auto-fills as much as possible from the template row so callers
  * only need to supply values for the variable-bearing fields:

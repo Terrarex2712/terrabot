@@ -7,6 +7,8 @@ import { buildSystemPrompt } from './defaults'
 import { buildHandoffSummary } from './handoff'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
+import { loadAiTemplateSpecs, buildTemplateTool, buildTemplateToolValidator } from './templates'
+import { sendAiTemplateReply } from './send-template'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
@@ -106,22 +108,31 @@ export async function dispatchInboundToAiReply(
       latestUserMessage(messages),
     )
 
+    // Only Anthropic has tool-calling wired up (see providers/openai.ts's
+    // documented gap) — offering the template tool for other providers
+    // would be dead weight the model can never actually use.
+    const templates =
+      config.provider === 'anthropic' ? await loadAiTemplateSpecs(db, accountId) : []
+
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
       mode: 'auto_reply',
       knowledge,
+      templatesAvailable: templates.length > 0,
     })
 
-    const { text, handoff, usage } = await generateReply({
+    const result = await generateReply({
       config,
       systemPrompt,
       messages,
+      tools: templates.length ? [buildTemplateTool(templates)] : undefined,
+      validateToolUse: templates.length ? buildTemplateToolValidator(templates) : undefined,
     })
 
     // Record token spend on the account's BYO key. Fire-and-forget so it
     // never adds latency to the customer-facing send: `logAiUsage`
     // swallows its own errors, so the floating promise can't reject.
-    // Logged regardless of handoff — the provider call happened either
+    // Logged regardless of outcome — the provider call happened either
     // way.
     void logAiUsage(db, {
       accountId,
@@ -129,10 +140,10 @@ export async function dispatchInboundToAiReply(
       mode: 'auto_reply',
       provider: config.provider,
       model: config.model,
-      usage,
+      usage: result.usage,
     })
 
-    if (handoff || !text) {
+    if (result.kind === 'handoff' || (result.kind === 'text' && !result.text)) {
       // The model can't (or shouldn't) answer — stop auto-replying on
       // this thread and hand it to a human. We (a) pause the bot here
       // (sticky until re-enabled), (b) route the conversation to the
@@ -179,12 +190,26 @@ export async function dispatchInboundToAiReply(
     }
     if (claimed !== true) return // lost the per-conversation cap race
 
+    if (result.kind === 'template') {
+      await sendAiTemplateReply({
+        accountId,
+        userId: configOwnerUserId,
+        conversationId,
+        contactId,
+        templateName: result.templateName,
+        templateLanguage: result.templateLanguage,
+        bodyParams: result.bodyParams,
+        headerText: result.headerText,
+      })
+      return
+    }
+
     await engineSendText({
       accountId,
       userId: configOwnerUserId,
       conversationId,
       contactId,
-      text,
+      text: result.text,
       aiGenerated: true,
     })
   } catch (err) {

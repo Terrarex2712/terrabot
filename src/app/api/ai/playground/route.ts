@@ -84,7 +84,12 @@ export async function POST(request: Request) {
       knowledge,
     })
 
-    const { text, handoff } = await generateReply({ config, systemPrompt, messages })
+    // Playground never passes `tools`, so the model can't select a
+    // template here yet — it's intentionally left text-only for now,
+    // even though it otherwise mirrors the live auto-reply path.
+    const result = await generateReply({ config, systemPrompt, messages })
+    const text = result.kind === 'text' ? result.text : ''
+    const handoff = result.kind === 'handoff'
     return NextResponse.json({ reply: text, handoff })
   } catch (err) {
     if (err instanceof AiError) {

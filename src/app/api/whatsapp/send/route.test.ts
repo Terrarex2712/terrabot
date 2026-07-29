@@ -47,8 +47,8 @@ function makeSupabaseMock() {
             data: {
               id: 'cfg-1',
               account_id: 'acct-1',
-              phone_number_id: 'PNID-1',
-              access_token: 'enc-token',
+              project_id: 'PROJECT-1',
+              api_key: 'enc-key',
             },
             error: null,
           }
@@ -146,7 +146,7 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
 const { sendTemplateMessage } = vi.hoisted(() => ({
   sendTemplateMessage: vi.fn(async () => ({ messageId: 'wamid-1' })),
 }))
-vi.mock('@/lib/whatsapp/meta-api', () => ({
+vi.mock('@/lib/whatsapp/aisensy-api', () => ({
   sendTemplateMessage,
   sendTextMessage: vi.fn(),
   sendMediaMessage: vi.fn(),

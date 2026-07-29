@@ -21,7 +21,7 @@
 // mid-conversation.
 // ============================================================
 
-import { INTERACTIVE_LIMITS } from './meta-api'
+import { INTERACTIVE_LIMITS } from './aisensy-api'
 
 export interface InteractiveButton {
   /** Stable id echoed back in the webhook when tapped. */

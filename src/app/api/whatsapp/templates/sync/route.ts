@@ -2,124 +2,102 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
-import type { TemplateButton, TemplateSampleValues } from '@/types'
+import type { TemplateButton } from '@/types'
 
 /**
- * Sync message templates from Meta → local message_templates table.
+ * Sync message templates from AiSensy → local message_templates table.
  *
- * The local catalog stores Meta's status enum verbatim (APPROVED /
- * PENDING / REJECTED / PAUSED / DISABLED / IN_APPEAL / PENDING_DELETION)
- * so the edit / resubmit / delete flows can distinguish recoverable
- * states (PAUSED) from terminal ones (DISABLED) and so webhook events
- * land 1:1 without a translation table.
+ * Templates are dashboard-managed on AiSensy's side (no create/edit/
+ * delete API available at this project's credential tier — confirmed
+ * empirically, POST returns 403). This route only ever reads.
  *
- * Locally-created templates (no Meta counterpart) are NOT deleted —
- * they remain visible so the user can notice drift and clean up.
+ * Confirmed via a real call to `GET /project/{id}/wa_template`:
+ *   { template: [{ id, name, label, status, category, text,
+ *       sample_text, message_action_type, total_parameters, buttons,
+ *       template_id, language, created_at, updated_at, ... }],
+ *     size: <returned count>, count: <total available> }
+ *
+ * Pagination: the default page is 10 templates. `page`/`offset`/`skip`/
+ * `start`/`cursor` are all silently ignored — confirmed by requesting
+ * each against a real 45-template account and getting back the exact
+ * same first 10 every time. `limit` is the one query param that
+ * actually works (confirmed: `?limit=50` against that same account
+ * returned all 45, uniquely). There's still no real offset-based
+ * paging, so "fetch everything" means one extra request sized to
+ * `count` rather than a loop: request the default page, and if
+ * `count > size`, refetch once with `?limit=${count}`.
+ *
+ * One known remaining gap:
+ *   - `language` comes back as a human name ("English (US)", "Hindi"),
+ *     not a Meta-style code ("en_US"). Stored verbatim — whether
+ *     AiSensy's send endpoint wants this same string or a translated
+ *     code back is unconfirmed until a template send is attempted.
+ *
+ * Locally-created rows with no AiSensy counterpart are NOT deleted —
+ * they remain visible so drift is noticeable rather than silently
+ * erased.
  */
 
-const META_API_VERSION = 'v21.0'
-const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const AISENSY_API_BASE = 'https://apis.aisensy.com/project-apis/v1'
 
-interface MetaButton {
+interface AiSensyTemplateButton {
   type: string
-  text: string
-  url?: string
-  phone_number?: string
-  example?: string[] | string
+  button_title?: string
+  button_value?: string
 }
 
-interface MetaTemplateComponent {
-  type: string
-  text?: string
-  format?: string
-  buttons?: MetaButton[]
-  example?: {
-    header_text?: string[]
-    header_handle?: string[]
-    body_text?: string[][]
-  }
-}
-
-interface MetaTemplate {
+interface AiSensyTemplate {
   id: string
   name: string
-  language: string
+  label?: string
   status: string
   category: string
-  components?: MetaTemplateComponent[]
-  quality_score?: { score?: string } | string
+  type?: string
+  language?: string
+  text?: string
+  footerText?: string
+  buttons?: AiSensyTemplateButton[]
+  template_id?: string
+  created_at?: number
+  updated_at?: number
 }
 
 function normalizeCategory(
-  meta: string,
+  raw: string,
 ): 'Marketing' | 'Utility' | 'Authentication' {
-  const upper = meta.toUpperCase()
+  const upper = raw.toUpperCase()
   if (upper === 'UTILITY') return 'Utility'
   if (upper === 'AUTHENTICATION') return 'Authentication'
   return 'Marketing'
 }
 
-function normalizeQualityScore(
-  raw: MetaTemplate['quality_score'],
-): 'GREEN' | 'YELLOW' | 'RED' | null {
-  const score =
-    typeof raw === 'string' ? raw : raw?.score ? String(raw.score) : null
-  if (!score) return null
-  const upper = score.toUpperCase()
-  return upper === 'GREEN' || upper === 'YELLOW' || upper === 'RED'
-    ? (upper as 'GREEN' | 'YELLOW' | 'RED')
-    : null
-}
-
-function parseButtons(metaButtons: MetaButton[] | undefined): TemplateButton[] {
-  if (!metaButtons?.length) return []
+function parseButtons(
+  aisensyButtons: AiSensyTemplateButton[] | undefined,
+): TemplateButton[] {
+  if (!aisensyButtons?.length) return []
   const out: TemplateButton[] = []
-  for (const b of metaButtons) {
+  for (const b of aisensyButtons) {
+    const title = b.button_title ?? ''
     switch (b.type?.toUpperCase()) {
       case 'QUICK_REPLY':
-        out.push({ type: 'QUICK_REPLY', text: b.text })
+        out.push({ type: 'QUICK_REPLY', text: title })
         break
       case 'URL':
-        out.push({
-          type: 'URL',
-          text: b.text,
-          url: b.url ?? '',
-          example: Array.isArray(b.example) ? b.example[0] : b.example,
-        })
+        out.push({ type: 'URL', text: title, url: b.button_value ?? '' })
         break
       case 'PHONE_NUMBER':
+      case 'CALL':
         out.push({
           type: 'PHONE_NUMBER',
-          text: b.text,
-          phone_number: b.phone_number ?? '',
+          text: title,
+          phone_number: b.button_value ?? '',
         })
         break
-      case 'COPY_CODE':
-        out.push({
-          type: 'COPY_CODE',
-          text: b.text,
-          example: Array.isArray(b.example) ? b.example[0] ?? '' : b.example ?? '',
-        })
-        break
-      // OTP, FLOW, etc — out of scope for v1; drop silently.
+      // COPY_CODE and anything else — no confirmed AiSensy shape yet;
+      // drop silently rather than guess.
     }
   }
   return out
-}
-
-function extractSampleValues(
-  body: MetaTemplateComponent | undefined,
-  header: MetaTemplateComponent | undefined,
-): TemplateSampleValues | null {
-  // Meta returns body_text as a 2D array — one row per example set.
-  // We take the first row (most templates have exactly one).
-  const bodySample = body?.example?.body_text?.[0]
-  const headerSample = header?.example?.header_text
-  if (!bodySample?.length && !headerSample?.length) return null
-  const sv: TemplateSampleValues = {}
-  if (bodySample?.length) sv.body = bodySample
-  if (headerSample?.length) sv.header = headerSample
-  return sv
 }
 
 export async function POST() {
@@ -135,8 +113,6 @@ export async function POST() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // Resolve the caller's account_id — both whatsapp_config and
-    // the message_templates we sync into are account-scoped.
     const { data: profile } = await supabase
       .from('profiles')
       .select('account_id')
@@ -156,101 +132,78 @@ export async function POST() {
       .eq('account_id', accountId)
       .single()
 
-    if (configError || !config) {
+    if (configError || !config || !config.project_id || !config.api_key) {
       return NextResponse.json(
         {
           error:
-            'WhatsApp not configured. Connect your WhatsApp Business account in Settings first.',
+            'WhatsApp not configured. Connect your AiSensy project in Settings first.',
         },
         { status: 400 },
       )
     }
 
-    if (!config.waba_id) {
-      return NextResponse.json(
-        {
-          error:
-            'WABA (WhatsApp Business Account) ID missing. Re-connect your account in Settings.',
+    const apiKey = decrypt(config.api_key)
+    const templateUrl = `${AISENSY_API_BASE}/project/${config.project_id}/wa_template`
+
+    async function fetchTemplates(query?: string) {
+      const res = await fetch(query ? `${templateUrl}?${query}` : templateUrl, {
+        headers: {
+          Accept: 'application/json',
+          'X-AiSensy-Project-API-Pwd': apiKey,
         },
-        { status: 400 },
-      )
-    }
-
-    const accessToken = decrypt(config.access_token)
-
-    const metaTemplates: MetaTemplate[] = []
-    let nextUrl:
-      | string
-      | null = `${META_API_BASE}/${config.waba_id}/message_templates?limit=100&fields=id,name,language,status,category,components,quality_score`
-    const PAGE_CAP = 20
-    let pageCount = 0
-
-    while (nextUrl && pageCount < PAGE_CAP) {
-      pageCount++
-      const metaRes: Response = await fetch(nextUrl, {
-        headers: { Authorization: `Bearer ${accessToken}` },
       })
-
-      if (!metaRes.ok) {
-        let metaErr = `Meta API error: ${metaRes.status}`
+      if (!res.ok) {
+        let message = `AiSensy API error: ${res.status}`
         try {
-          const body = await metaRes.json()
-          if (body?.error?.message) metaErr = body.error.message
+          const body = await res.json()
+          if (body?.message) message = body.message
         } catch {
           // response wasn't JSON — keep the fallback
         }
-        return NextResponse.json({ error: metaErr }, { status: 502 })
+        throw new Error(message)
       }
-
-      const metaBody: {
-        data?: MetaTemplate[]
-        paging?: { next?: string }
-      } = await metaRes.json()
-      if (metaBody.data) metaTemplates.push(...metaBody.data)
-      nextUrl = metaBody.paging?.next ?? null
+      return (await res.json()) as { template?: AiSensyTemplate[]; size?: number; count?: number }
     }
+
+    let aisensyBody: { template?: AiSensyTemplate[]; size?: number; count?: number }
+    try {
+      aisensyBody = await fetchTemplates()
+      // `limit` is the only pagination knob AiSensy actually honors —
+      // see the module docstring. One extra request sized to `count`
+      // covers the rest instead of a real offset-based loop.
+      if (
+        typeof aisensyBody.count === 'number' &&
+        aisensyBody.count > (aisensyBody.template?.length ?? 0)
+      ) {
+        aisensyBody = await fetchTemplates(`limit=${aisensyBody.count}`)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'AiSensy API error'
+      return NextResponse.json({ error: message }, { status: 502 })
+    }
+
+    const templates = aisensyBody.template ?? []
+    const truncated =
+      typeof aisensyBody.count === 'number' && aisensyBody.count > templates.length
 
     let inserted = 0
     let updated = 0
     const errors: { name: string; language: string; message: string }[] = []
 
-    for (const t of metaTemplates) {
-      const body = (t.components ?? []).find((c) => c.type === 'BODY')
-      const header = (t.components ?? []).find((c) => c.type === 'HEADER')
-      const footer = (t.components ?? []).find((c) => c.type === 'FOOTER')
-      const buttons = (t.components ?? []).find((c) => c.type === 'BUTTONS')
-
-      const parsedButtons = parseButtons(buttons?.buttons)
-      const sampleValues = extractSampleValues(body, header)
-
-      const headerFormat = header?.format?.toUpperCase()
-      const headerType =
-        headerFormat === 'TEXT' ||
-        headerFormat === 'IMAGE' ||
-        headerFormat === 'VIDEO' ||
-        headerFormat === 'DOCUMENT'
-          ? headerFormat.toLowerCase()
-          : null
+    for (const t of templates) {
+      const language = t.language ?? 'en'
 
       const row = {
-        // Account tenancy + user audit, same split as the submit
-        // route. account_id is NOT NULL on message_templates
-        // post-017, so an INSERT without it errors.
         account_id: accountId,
         user_id: user.id,
         name: t.name,
         category: normalizeCategory(t.category),
-        language: t.language,
-        header_type: headerType,
-        header_content: header?.text ?? null,
-        header_handle: header?.example?.header_handle?.[0] ?? null,
-        body_text: body?.text ?? '',
-        footer_text: footer?.text ?? null,
-        buttons: parsedButtons.length ? parsedButtons : null,
-        sample_values: sampleValues,
+        language,
+        body_text: t.text ?? '',
+        footer_text: t.footerText ?? null,
+        buttons: parseButtons(t.buttons).length ? parseButtons(t.buttons) : null,
         status: normalizeStatus(t.status),
-        meta_template_id: t.id,
-        quality_score: normalizeQualityScore(t.quality_score),
+        meta_template_id: t.template_id ?? null,
         updated_at: new Date().toISOString(),
       }
 
@@ -259,15 +212,11 @@ export async function POST() {
         .select('id')
         .eq('account_id', accountId)
         .eq('name', t.name)
-        .eq('language', t.language)
+        .eq('language', language)
         .maybeSingle()
 
       if (lookupErr) {
-        errors.push({
-          name: t.name,
-          language: t.language,
-          message: lookupErr.message,
-        })
+        errors.push({ name: t.name, language, message: lookupErr.message })
         continue
       }
 
@@ -277,24 +226,14 @@ export async function POST() {
           .update(row)
           .eq('id', existing.id)
         if (updErr) {
-          errors.push({
-            name: t.name,
-            language: t.language,
-            message: updErr.message,
-          })
+          errors.push({ name: t.name, language, message: updErr.message })
         } else {
           updated++
         }
       } else {
-        const { error: insErr } = await supabase
-          .from('message_templates')
-          .insert(row)
+        const { error: insErr } = await supabase.from('message_templates').insert(row)
         if (insErr) {
-          errors.push({
-            name: t.name,
-            language: t.language,
-            message: insErr.message,
-          })
+          errors.push({ name: t.name, language, message: insErr.message })
         } else {
           inserted++
         }
@@ -303,11 +242,11 @@ export async function POST() {
 
     return NextResponse.json({
       success: errors.length === 0,
-      total: metaTemplates.length,
+      total: templates.length,
       inserted,
       updated,
       errors,
-      truncated: pageCount >= PAGE_CAP && nextUrl !== null,
+      truncated,
     })
   } catch (error) {
     console.error('Error syncing WhatsApp templates:', error)

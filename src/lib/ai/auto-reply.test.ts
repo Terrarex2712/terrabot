@@ -8,6 +8,10 @@ const h = vi.hoisted(() => ({
   retrieveKnowledge: vi.fn(),
   generateReply: vi.fn(),
   engineSendText: vi.fn(),
+  loadAiTemplateSpecs: vi.fn(),
+  buildTemplateTool: vi.fn(),
+  buildTemplateToolValidator: vi.fn(),
+  sendAiTemplateReply: vi.fn(),
   state: {
     conv: null as Record<string, unknown> | null,
     autoResponders: [] as { id: string }[],
@@ -22,6 +26,12 @@ vi.mock('./context', () => ({ buildConversationContext: h.buildConversationConte
 vi.mock('./knowledge', () => ({ retrieveKnowledge: h.retrieveKnowledge }))
 vi.mock('./generate', () => ({ generateReply: h.generateReply }))
 vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }))
+vi.mock('./templates', () => ({
+  loadAiTemplateSpecs: h.loadAiTemplateSpecs,
+  buildTemplateTool: h.buildTemplateTool,
+  buildTemplateToolValidator: h.buildTemplateToolValidator,
+}))
+vi.mock('./send-template', () => ({ sendAiTemplateReply: h.sendAiTemplateReply }))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -94,8 +104,12 @@ beforeEach(() => {
   h.loadAiConfig.mockResolvedValue(aiConfig())
   h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi' }])
   h.retrieveKnowledge.mockResolvedValue([])
-  h.generateReply.mockResolvedValue({ text: 'Hello!', handoff: false })
+  h.generateReply.mockResolvedValue({ kind: 'text', text: 'Hello!', usage: null })
   h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'm1' })
+  h.loadAiTemplateSpecs.mockResolvedValue([])
+  h.buildTemplateTool.mockReturnValue({ name: 'send_whatsapp_template', description: 'd', inputSchema: {} })
+  h.buildTemplateToolValidator.mockReturnValue(() => ({ ok: true }))
+  h.sendAiTemplateReply.mockResolvedValue({ whatsapp_message_id: 'm2' })
 })
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
@@ -188,7 +202,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
 
 describe('dispatchInboundToAiReply — handoff', () => {
   it('disables auto-reply, writes a summary, and does not send on handoff', async () => {
-    h.generateReply.mockResolvedValue({ text: '', handoff: true })
+    h.generateReply.mockResolvedValue({ kind: 'handoff', usage: null })
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
     expect(h.state.rpcCalls).toHaveLength(0)
@@ -202,11 +216,74 @@ describe('dispatchInboundToAiReply — handoff', () => {
 
   it('routes to the configured handoff agent on handoff', async () => {
     h.loadAiConfig.mockResolvedValue(aiConfig({ handoffAgentId: 'agent-7' }))
-    h.generateReply.mockResolvedValue({ text: '', handoff: true })
+    h.generateReply.mockResolvedValue({ kind: 'handoff', usage: null })
     await dispatchInboundToAiReply(ARGS)
     expect(h.state.updatePayload).toMatchObject({
       ai_autoreply_disabled: true,
       assigned_agent_id: 'agent-7',
     })
+  })
+
+  it('treats an empty text result the same as a handoff', async () => {
+    h.generateReply.mockResolvedValue({ kind: 'text', text: '', usage: null })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+  })
+})
+
+describe('dispatchInboundToAiReply — template sends', () => {
+  it('sends via sendAiTemplateReply, not engineSendText, when the model picks a template', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ provider: 'anthropic' }))
+    h.loadAiTemplateSpecs.mockResolvedValue([{ name: 'order_status' }])
+    h.generateReply.mockResolvedValue({
+      kind: 'template',
+      templateName: 'order_status',
+      bodyParams: ['12345'],
+      usage: null,
+    })
+
+    await dispatchInboundToAiReply(ARGS)
+
+    expect(h.sendAiTemplateReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        contactId: 'contact-1',
+        templateName: 'order_status',
+        bodyParams: ['12345'],
+      }),
+    )
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('never offers tools for a non-Anthropic provider', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ provider: 'openai' }))
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.loadAiTemplateSpecs).not.toHaveBeenCalled()
+    expect(h.generateReply).toHaveBeenCalledWith(
+      expect.objectContaining({ tools: undefined, validateToolUse: undefined }),
+    )
+  })
+
+  it('never offers tools when the Anthropic account has no eligible templates', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ provider: 'anthropic' }))
+    h.loadAiTemplateSpecs.mockResolvedValue([])
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.generateReply).toHaveBeenCalledWith(
+      expect.objectContaining({ tools: undefined, validateToolUse: undefined }),
+    )
+  })
+
+  it('swallows a send failure instead of throwing', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ provider: 'anthropic' }))
+    h.loadAiTemplateSpecs.mockResolvedValue([{ name: 'order_status' }])
+    h.generateReply.mockResolvedValue({
+      kind: 'template',
+      templateName: 'order_status',
+      usage: null,
+    })
+    h.sendAiTemplateReply.mockRejectedValue(new Error('template no longer approved'))
+
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.toBeUndefined()
   })
 })

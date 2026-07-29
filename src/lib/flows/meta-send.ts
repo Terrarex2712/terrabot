@@ -6,30 +6,22 @@ import {
   type InteractiveButton,
   type InteractiveListSection,
   type MediaKind,
-} from '@/lib/whatsapp/meta-api'
+} from '@/lib/whatsapp/aisensy-api'
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   sanitizePhoneForMeta,
   isValidE164,
-  phoneVariants,
-  isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
-// Flows-side Meta sender (interactive variants).
+// Flows-side AiSensy sender (interactive variants).
 //
 // Mirrors src/lib/automations/meta-send.ts (engineSendText /
 // engineSendTemplate) but emits interactive button + list messages.
 // Kept separate from the automations file so the two engines don't
-// fight over each other's shape — once both stabilize, the
-// phone-variant retry + DB persistence are obvious extraction
-// candidates into a shared base.
-//
-// PR #1 ships this in isolation: callers don't exist yet. PR #2
-// brings the flow runner online and wires it up. Shipping it now
-// keeps the foundation PR self-contained and unit-testable.
+// fight over each other's shape.
 // ------------------------------------------------------------
 
 interface SendTextEngineArgs {
@@ -57,10 +49,9 @@ interface SendTextEngineArgs {
  * both prompt the customer with text and either auto-advance (the
  * send_message case) or suspend awaiting a text reply (collect_input).
  *
- * Wraps the same phone-variant retry + DB persistence pattern as the
- * interactive senders; the duplication will be DRY'd into a shared
- * `engineSendBase` once the v2 features (templates with variables,
- * media sends) settle.
+ * DB persistence follows the same pattern as the interactive senders;
+ * the duplication will be DRY'd into a shared `engineSendBase` once
+ * the v2 features (templates with variables, media sends) settle.
  */
 export async function engineSendText(
   args: SendTextEngineArgs,
@@ -91,39 +82,14 @@ export async function engineSendText(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  const apiKey = decrypt(config.api_key)
 
-  const attempt = async (phone: string): Promise<string> => {
-    const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      text: args.text,
-    })
-    return r.messageId
-  }
-
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
-    }
-  }
-  if (lastError) throw lastError
-
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
-  }
+  const { messageId: waMessageId } = await sendTextMessage({
+    projectId: config.project_id,
+    apiKey,
+    to: sanitized,
+    text: args.text,
+  })
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: args.conversationId,
@@ -135,7 +101,7 @@ export async function engineSendText(
     ai_generated: args.aiGenerated ?? false,
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to AiSensy but DB insert failed: ${msgErr.message}`)
   }
 
   await db
@@ -167,10 +133,9 @@ interface SendMediaEngineArgs {
  * Send an image / video / document from the Flows engine.
  *
  * Used by the runner's `send_media` node. Auto-advances after the
- * send lands (same suspend semantics as send_message). Same
- * phone-variant retry + DB persistence as the text/interactive
- * senders; persists the outgoing message with `content_type` matching
- * the media kind so the inbox renders the right preview.
+ * send lands (same suspend semantics as send_message). Persists the
+ * outgoing message with `content_type` matching the media kind so
+ * the inbox renders the right preview.
  */
 export async function engineSendMedia(
   args: SendMediaEngineArgs,
@@ -201,42 +166,17 @@ export async function engineSendMedia(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  const apiKey = decrypt(config.api_key)
 
-  const attempt = async (phone: string): Promise<string> => {
-    const r = await sendMediaMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      kind: args.kind,
-      link: args.link,
-      caption: args.caption,
-      filename: args.filename,
-    })
-    return r.messageId
-  }
-
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
-    }
-  }
-  if (lastError) throw lastError
-
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
-  }
+  const { messageId: waMessageId } = await sendMediaMessage({
+    projectId: config.project_id,
+    apiKey,
+    to: sanitized,
+    kind: args.kind,
+    link: args.link,
+    caption: args.caption,
+    filename: args.filename,
+  })
 
   // content_type='image'|'video'|'document' — these are already in the
   // messages_content_type_check constraint (migration 001 + 010).
@@ -252,7 +192,7 @@ export async function engineSendMedia(
     status: 'sent',
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to AiSensy but DB insert failed: ${msgErr.message}`)
   }
 
   await db
@@ -353,58 +293,29 @@ async function sendInteractiveViaMeta(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  const apiKey = decrypt(config.api_key)
 
-  const attempt = async (phone: string): Promise<string> => {
-    if (input.kind === 'buttons') {
-      const r = await sendInteractiveButtons({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-        to: phone,
-        bodyText: input.bodyText,
-        buttons: input.buttons,
-        headerText: input.headerText,
-        footerText: input.footerText,
-      })
-      return r.messageId
-    }
-    const r = await sendInteractiveList({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
-      to: phone,
-      bodyText: input.bodyText,
-      buttonLabel: input.buttonLabel,
-      sections: input.sections,
-      headerText: input.headerText,
-      footerText: input.footerText,
-    })
-    return r.messageId
-  }
-
-  // Same phone-variant retry as automations/meta-send.ts. Numbers
-  // registered with/without a trunk 0 + Meta's sandbox quirks all
-  // need this to reliably land a message.
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
-  let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
-    }
-  }
-  if (lastError) throw lastError
-
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
-  }
+  const { messageId: waMessageId } =
+    input.kind === 'buttons'
+      ? await sendInteractiveButtons({
+          projectId: config.project_id,
+          apiKey,
+          to: sanitized,
+          bodyText: input.bodyText,
+          buttons: input.buttons,
+          headerText: input.headerText,
+          footerText: input.footerText,
+        })
+      : await sendInteractiveList({
+          projectId: config.project_id,
+          apiKey,
+          to: sanitized,
+          bodyText: input.bodyText,
+          buttonLabel: input.buttonLabel,
+          sections: input.sections,
+          headerText: input.headerText,
+          footerText: input.footerText,
+        })
 
   // Persist the bot's prompt to the messages table so it appears in
   // the inbox. content_type='interactive' is supported as of
@@ -445,7 +356,7 @@ async function sendInteractiveViaMeta(
     status: 'sent',
   })
   if (msgErr) {
-    throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+    throw new Error(`sent to AiSensy but DB insert failed: ${msgErr.message}`)
   }
 
   await db

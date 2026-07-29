@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  isRecipientNotAllowedError,
   isValidE164,
   normalizePhone,
-  phoneVariants,
   phonesMatch,
   sanitizePhoneForMeta,
 } from "./phone-utils";
@@ -89,76 +87,5 @@ describe("isValidE164", () => {
 
   it("rejects the empty string", () => {
     expect(isValidE164("")).toBe(false);
-  });
-});
-
-describe("phoneVariants", () => {
-  it("returns an empty list for empty input", () => {
-    expect(phoneVariants("")).toEqual([]);
-  });
-
-  it("always lists the original number first", () => {
-    const out = phoneVariants("37063949836");
-    expect(out[0]).toBe("37063949836");
-  });
-
-  it("inserts a trunk 0 after each plausible country-code length", () => {
-    // Input "37063949836" — CC-1 → "3" + "0" + "7063949836",
-    //                       CC-3 → "370" + "0" + "63949836".
-    // CC-2 is skipped because "063949836" already starts with 0.
-    const out = phoneVariants("37063949836");
-    expect(out).toEqual(
-      expect.arrayContaining([
-        "37063949836",
-        "307063949836",
-        "370063949836",
-      ]),
-    );
-  });
-
-  it("removes a leading 0 after the country code when present", () => {
-    // Input "370063949836" — CC-2 strips one leading 0 from
-    // "0063949836" → "37" + "063949836" = "37063949836". Only one zero
-    // comes off per pass; that's what the live retry loop needs.
-    const out = phoneVariants("370063949836");
-    expect(out).toContain("370063949836");
-    expect(out).toContain("37063949836");
-  });
-
-  it("deduplicates variants that collapse to the same digits", () => {
-    const out = phoneVariants("37063949836");
-    expect(new Set(out).size).toBe(out.length);
-  });
-
-  it("returns just the original when the number is too short for any CC slice", () => {
-    // 1-char input is shorter than all ccLen values; both loops skip.
-    expect(phoneVariants("1")).toEqual(["1"]);
-  });
-});
-
-describe("isRecipientNotAllowedError", () => {
-  it("matches Meta error code 131030", () => {
-    expect(
-      isRecipientNotAllowedError(
-        "(#131030) Recipient phone number not in allowed list",
-      ),
-    ).toBe(true);
-  });
-
-  it("matches the human-readable English variants", () => {
-    expect(isRecipientNotAllowedError("not in allowed list")).toBe(true);
-    expect(isRecipientNotAllowedError("recipient not in the allowed list")).toBe(
-      true,
-    );
-    // Case-insensitive on the human text.
-    expect(isRecipientNotAllowedError("NOT IN ALLOWED LIST")).toBe(true);
-  });
-
-  it("does not false-positive on unrelated Meta errors", () => {
-    expect(isRecipientNotAllowedError("(#100) Invalid parameter")).toBe(false);
-    expect(isRecipientNotAllowedError("template name does not exist")).toBe(
-      false,
-    );
-    expect(isRecipientNotAllowedError("")).toBe(false);
   });
 });

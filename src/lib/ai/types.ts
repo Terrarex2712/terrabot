@@ -48,21 +48,55 @@ export interface AiUsage {
   totalTokens: number
 }
 
-/** Raw text + usage a provider adapter returns before handoff parsing. */
+/** A tool call the model made instead of (or alongside) plain text. */
+export interface ToolCall {
+  name: string
+  input: Record<string, unknown>
+}
+
+/** Raw text + usage a provider adapter returns before handoff parsing.
+ *  `toolCall` is set only by adapters that support tool-calling (currently
+ *  Anthropic only) and only when the model actually invoked one. */
 export interface ProviderResult {
   text: string
   usage: AiUsage | null
+  toolCall?: ToolCall
 }
 
-/** Outcome of a generation call. */
-export interface GenerateResult {
-  /** The reply text, with any handoff sentinel stripped. */
-  text: string
-  /** True when the model asked to hand off to a human (auto-reply mode). */
-  handoff: boolean
-  /** Provider token usage for this call, or null when unavailable. */
-  usage: AiUsage | null
+/**
+ * A tool definition a provider adapter can offer the model, in our
+ * provider-neutral shape. Adapters translate `inputSchema` into whatever
+ * their API expects (Anthropic: `input_schema`).
+ */
+export interface AiTool {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
 }
+
+/** Validates a tool call's input once parsed. Returns `ok: true`, or
+ *  `ok: false` with a human-readable reason a provider adapter can feed
+ *  back to the model as a tool-result error. */
+export type ToolCallValidator = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => { ok: true } | { ok: false; error: string }
+
+/**
+ * Outcome of a generation call — a discriminated union so callers can't
+ * accidentally read `text` off a template result or vice versa.
+ */
+export type GenerateResult =
+  | { kind: 'text'; text: string; usage: AiUsage | null }
+  | { kind: 'handoff'; usage: AiUsage | null }
+  | {
+      kind: 'template'
+      templateName: string
+      templateLanguage?: string
+      bodyParams?: string[]
+      headerText?: string
+      usage: AiUsage | null
+    }
 
 /**
  * Typed error for every AI failure mode. `status` maps cleanly to an

@@ -149,6 +149,7 @@ describe('resolveConversationByPhone', () => {
       conversationId: 'cv1',
       contactId: 'c1',
       contactCreated: false,
+      conversationCreated: false,
     });
   });
 
@@ -170,6 +171,7 @@ describe('resolveConversationByPhone', () => {
       conversationId: 'cv2',
       contactId: 'c2',
       contactCreated: true,
+      conversationCreated: true,
     });
   });
 
@@ -205,6 +207,7 @@ describe('resolveConversationByPhone', () => {
       conversationId: 'cv-raced',
       contactId: 'c1',
       contactCreated: false,
+      conversationCreated: false,
     });
   });
 });

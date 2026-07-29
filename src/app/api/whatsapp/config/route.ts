@@ -1,11 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import {
-  registerPhoneNumber,
-  subscribeWabaToApp,
-  verifyPhoneNumber,
-} from '@/lib/whatsapp/meta-api'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 
 /**
@@ -32,9 +27,9 @@ async function resolveAccountId(
 }
 
 // Lazy-initialised service-role client. We need it to detect a
-// phone_number_id already claimed by a *different* user — under RLS,
-// the user's own session can't see other users' rows, so the conflict
-// would be invisible without the service role.
+// project_id already claimed by a *different* account — under RLS,
+// the user's own session can't see other accounts' rows, so the
+// conflict would be invisible without the service role.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null
 function supabaseAdmin() {
@@ -51,14 +46,17 @@ function supabaseAdmin() {
  * GET /api/whatsapp/config
  *
  * Used by the "Test API Connection" button and by the page to check
- * whether the saved config is healthy. Returns 200 in all non-auth cases
- * so the UI can render an appropriate message rather than show a 500.
+ * whether the saved config is readable. There is no confirmed
+ * lightweight AiSensy endpoint to validate a project_id/api_key pair
+ * live, so this only confirms the stored api_key still decrypts with
+ * the current ENCRYPTION_KEY — not that AiSensy actually accepts it.
+ * Returns 200 in all non-auth cases so the UI can render an
+ * appropriate message rather than show a 500.
  *
  * Response shape:
- *   { connected: true,  phone_info: {...} }
- *   { connected: false, reason: 'no_config',        message: '...' }
+ *   { connected: true }
+ *   { connected: false, reason: 'no_config',       message: '...' }
  *   { connected: false, reason: 'token_corrupted',  message: '...', needs_reset: true }
- *   { connected: false, reason: 'meta_api_error',   message: '...' }
  */
 export async function GET() {
   try {
@@ -87,7 +85,7 @@ export async function GET() {
 
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
-      .select('phone_number_id, access_token, status')
+      .select('project_id, api_key')
       .eq('account_id', accountId)
       .maybeSingle()
 
@@ -110,44 +108,25 @@ export async function GET() {
       )
     }
 
-    // Try to decrypt the stored token with the current ENCRYPTION_KEY.
+    // Try to decrypt the stored key with the current ENCRYPTION_KEY.
     // If this fails, the key changed (or was never consistent across envs).
-    let accessToken: string
     try {
-      accessToken = decrypt(config.access_token)
+      decrypt(config.api_key)
     } catch (err) {
-      console.error('[whatsapp/config GET] Token decryption failed:', err)
+      console.error('[whatsapp/config GET] Key decryption failed:', err)
       return NextResponse.json(
         {
           connected: false,
           reason: 'token_corrupted',
           needs_reset: true,
           message:
-            'The stored access token cannot be decrypted with the current ENCRYPTION_KEY. This usually means the key changed, or it differs between environments (local vs Hostinger vs Vercel). Click "Reset Configuration" below, then re-save.',
+            'The stored API key cannot be decrypted with the current ENCRYPTION_KEY. This usually means the key changed, or it differs between environments (local vs Hostinger vs Vercel). Click "Reset Configuration" below, then re-save.',
         },
         { status: 200 }
       )
     }
 
-    // Validate credentials against Meta
-    try {
-      const phoneInfo = await verifyPhoneNumber({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
-      })
-      return NextResponse.json({ connected: true, phone_info: phoneInfo })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown Meta API error'
-      console.error('[whatsapp/config GET] Meta API verification failed:', message)
-      return NextResponse.json(
-        {
-          connected: false,
-          reason: 'meta_api_error',
-          message: `Meta API rejected the credentials: ${message}`,
-        },
-        { status: 200 }
-      )
-    }
+    return NextResponse.json({ connected: true })
   } catch (error) {
     console.error('Error in WhatsApp config GET:', error)
     return NextResponse.json(
@@ -160,8 +139,11 @@ export async function GET() {
 /**
  * POST /api/whatsapp/config
  *
- * Saves or updates the WhatsApp config for the authenticated user.
- * Verifies credentials with Meta first, then encrypts and stores.
+ * Saves or updates the AiSensy config for the caller's account.
+ * `project_id` is always required. `api_key` is required on first
+ * save; on an update it's optional — omitting it keeps the existing
+ * encrypted key (there's no live "verify with the provider" step to
+ * force re-entry the way Meta's flow did).
  */
 export async function POST(request: Request) {
   try {
@@ -185,40 +167,44 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json()
-    const { phone_number_id, waba_id, access_token, verify_token, pin } = body
+    const { project_id, api_key } = body
 
-    if (!access_token || !phone_number_id) {
+    if (!project_id || typeof project_id !== 'string') {
       return NextResponse.json(
-        { error: 'access_token and phone_number_id are required' },
+        { error: 'project_id is required' },
         { status: 400 }
       )
     }
 
-    if (pin !== undefined && pin !== null && pin !== '') {
-      if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) {
-        return NextResponse.json(
-          { error: 'PIN must be exactly 6 digits.' },
-          { status: 400 }
-        )
-      }
+    const { data: existing } = await supabase
+      .from('whatsapp_config')
+      .select('id, api_key')
+      .eq('account_id', accountId)
+      .maybeSingle()
+
+    if (!existing && (!api_key || typeof api_key !== 'string')) {
+      return NextResponse.json(
+        { error: 'api_key is required for initial setup' },
+        { status: 400 }
+      )
     }
 
-    // Reject if another account has already claimed this phone_number_id.
-    // wacrm is single-tenant-per-WhatsApp-number — letting two accounts
-    // bind the same number causes the webhook's `.single()` lookup to
-    // throw PGRST116 ("multiple rows"), silently dropping every
-    // inbound message. See issue #136. Post-multi-user we key on
-    // account_id (not user_id) since teammates inside the same account
-    // all share one config; the conflict is between accounts.
+    // Reject if another account has already claimed this project_id.
+    // wacrm is single-tenant-per-WhatsApp-project — letting two
+    // accounts bind the same project makes the webhook's account
+    // lookup ambiguous, silently dropping every inbound message
+    // (same failure mode phone_number_id's uniqueness prevented for
+    // Meta — see issue #136). Keyed on account_id so teammates inside
+    // the same account share one config without tripping this.
     const { data: claimed, error: claimedError } = await supabaseAdmin()
       .from('whatsapp_config')
       .select('account_id')
-      .eq('phone_number_id', phone_number_id)
+      .eq('project_id', project_id)
       .neq('account_id', accountId)
       .maybeSingle()
 
     if (claimedError) {
-      console.error('Error checking phone_number_id ownership:', claimedError)
+      console.error('Error checking project_id ownership:', claimedError)
       return NextResponse.json(
         { error: 'Failed to validate configuration' },
         { status: 500 }
@@ -229,142 +215,37 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            'This WhatsApp phone number is already linked to another account on this instance. Each phone number can only be connected to one wacrm user.',
+            'This AiSensy project is already linked to another account on this instance. Each project can only be connected to one wacrm account.',
         },
         { status: 409 }
       )
     }
 
-    // Verify credentials with Meta BEFORE saving
-    let phoneInfo
+    // Encrypt whichever secrets were actually provided.
+    let encryptedApiKey: string | undefined
     try {
-      phoneInfo = await verifyPhoneNumber({
-        phoneNumberId: phone_number_id,
-        accessToken: access_token,
-      })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown Meta API error'
-      console.error('Meta API verification failed during save:', message)
-      return NextResponse.json(
-        { error: `Meta API error: ${message}` },
-        { status: 400 }
-      )
-    }
-
-    // Encrypt sensitive tokens before storing
-    let encryptedAccessToken: string
-    let encryptedVerifyToken: string | null
-    try {
-      encryptedAccessToken = encrypt(access_token)
-      encryptedVerifyToken = verify_token ? encrypt(verify_token) : null
+      if (typeof api_key === 'string' && api_key.trim()) {
+        encryptedApiKey = encrypt(api_key.trim())
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown encryption error'
       console.error('Encryption failed:', message)
       return NextResponse.json(
         {
           error:
-            'Failed to encrypt token. Check that ENCRYPTION_KEY is a valid 64-character hex string in your environment variables.',
+            'Failed to encrypt credentials. Check that ENCRYPTION_KEY is a valid 64-character hex string in your environment variables.',
         },
         { status: 500 }
       )
     }
 
-    // Look up any pre-existing row for this account so we know whether
-    // this number is already registered with Meta — if so we can skip
-    // /register when the user didn't provide a PIN this time around.
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id')
-      .eq('account_id', accountId)
-      .maybeSingle()
-
-    const sameNumber =
-      existing?.phone_number_id === phone_number_id &&
-      existing?.registered_at != null
-
-    // Step 1: register the phone number for inbound webhooks.
-    //
-    // Attempted on first save AND whenever the user supplies a fresh
-    // PIN (e.g. they rotated the 2FA PIN in Meta Manager). Skipped
-    // when the same number is already registered and no PIN was
-    // supplied — re-registering an already-active number with a
-    // stale PIN would actually fail and undo the active subscription.
-    let registeredAt: string | null = existing?.registered_at ?? null
-    let registrationError: string | null = null
-    // True when registration was deliberately skipped because no PIN
-    // was supplied (see below). Distinct from registrationError — this
-    // is not a failure, just an incomplete-but-valid save.
-    let registrationSkipped = false
-
-    const needsRegistration = !sameNumber || (typeof pin === 'string' && pin.length > 0)
-    if (needsRegistration) {
-      if (!pin) {
-        // No PIN provided. Meta TEST numbers (Developer Console) are
-        // pre-registered by Meta and expose no two-step verification
-        // PIN to set, so requiring one made them impossible to connect
-        // (issue #242). The /register + PIN step only matters for
-        // production numbers under a shared WABA (issue #136), so treat
-        // it as best-effort: skip it, save the (already Meta-verified)
-        // credentials as connected, and leave registered_at null. The
-        // UI surfaces a separate "Not registered" banner with a path to
-        // add a PIN later for users who do need inbound webhook routing.
-        registrationSkipped = true
-      } else {
-        try {
-          await registerPhoneNumber({
-            phoneNumberId: phone_number_id,
-            accessToken: access_token,
-            pin,
-          })
-          registeredAt = new Date().toISOString()
-        } catch (err) {
-          registrationError =
-            err instanceof Error ? err.message : 'Unknown Meta API error'
-          console.error('Phone number /register failed:', registrationError)
-          // We deliberately fall through and still save the row so the
-          // user can retry without re-entering everything. The UI
-          // surfaces `last_registration_error` so they see WHY it's
-          // not actually live yet.
-        }
-      }
-    }
-
-    // Step 2: subscribe the WABA to this app. Idempotent on Meta's
-    // side, so we call on every save and persist the timestamp.
-    // Skipped only when there's no waba_id (legacy rows from before
-    // we required it).
-    let subscribedAppsAt: string | null = null
-    if (waba_id) {
-      try {
-        await subscribeWabaToApp({
-          wabaId: waba_id,
-          accessToken: access_token,
-        })
-        subscribedAppsAt = new Date().toISOString()
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        console.warn('WABA subscribed_apps failed (non-fatal):', message)
-        // Subscription failures are rare once the App has the right
-        // permissions; we don't block save on them — the diagnostic
-        // endpoint surfaces this state too.
-      }
-    }
-
-    // Persist everything in one shot. If /register failed we still
-    // store the credentials and the error so the UI can guide the
-    // user through a retry.
-    const baseRow = {
-      phone_number_id,
-      waba_id: waba_id || null,
-      access_token: encryptedAccessToken,
-      verify_token: encryptedVerifyToken,
-      status: registrationError ? 'disconnected' : 'connected',
-      connected_at: registrationError ? null : new Date().toISOString(),
-      registered_at: registrationError ? null : registeredAt,
-      subscribed_apps_at: subscribedAppsAt ?? null,
-      last_registration_error: registrationError,
+    const baseRow: Record<string, unknown> = {
+      project_id,
+      status: 'connected',
+      connected_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }
+    if (encryptedApiKey) baseRow.api_key = encryptedApiKey
 
     if (existing) {
       const { error: updateError } = await supabase
@@ -401,30 +282,7 @@ export async function POST(request: Request) {
       }
     }
 
-    if (registrationError) {
-      // Save succeeded but the number isn't actually live. Return
-      // 200 with a structured error so the UI can show the specific
-      // remediation step instead of a generic toast.
-      return NextResponse.json({
-        success: false,
-        saved: true,
-        registered: false,
-        registration_error: registrationError,
-        phone_info: phoneInfo,
-      })
-    }
-
-    return NextResponse.json({
-      success: true,
-      saved: true,
-      registered: registeredAt != null,
-      // Credentials are valid and saved, but inbound webhook
-      // registration was skipped because no PIN was supplied (e.g. a
-      // Meta test number). The UI shows the "Not registered" banner
-      // rather than claiming the number is fully live.
-      registration_skipped: registrationSkipped,
-      phone_info: phoneInfo,
-    })
+    return NextResponse.json({ success: true, saved: true })
   } catch (error) {
     console.error('Error in WhatsApp config POST:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
@@ -434,9 +292,9 @@ export async function POST(request: Request) {
 /**
  * DELETE /api/whatsapp/config
  *
- * Removes the authenticated user's WhatsApp configuration row.
- * Used by the "Reset Configuration" button to recover from a corrupted
- * encrypted token (mismatched ENCRYPTION_KEY across environments).
+ * Removes the caller's account's WhatsApp configuration row. Used by
+ * the "Reset Configuration" button to recover from a corrupted
+ * encrypted key (mismatched ENCRYPTION_KEY across environments).
  */
 export async function DELETE() {
   try {

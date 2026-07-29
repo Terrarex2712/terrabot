@@ -104,7 +104,11 @@ export async function POST(request: Request) {
       knowledge,
     })
 
-    const { text, usage } = await generateReply({ config, systemPrompt, messages })
+    // Draft mode never passes `tools`, so this is always 'text' — the
+    // 'handoff' sentinel and template tool-calling are auto-reply-only.
+    const result = await generateReply({ config, systemPrompt, messages })
+    const text = result.kind === 'text' ? result.text : ''
+    const usage = result.usage
 
     // Record spend on the account's BYO key. Best-effort + via the
     // service role (the log has no `authenticated` INSERT policy). This

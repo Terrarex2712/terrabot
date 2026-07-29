@@ -30,6 +30,8 @@ export interface ResolvedConversation {
   contactId: string;
   /** True if this call created the contact (vs matched an existing one). */
   contactCreated: boolean;
+  /** True if this call created the conversation (vs matched an existing one). */
+  conversationCreated: boolean;
 }
 
 /**
@@ -142,14 +144,14 @@ export async function resolveConversationByPhone(
   // `.maybeSingle()`, which errors on ≥2 rows: if duplicates predate the
   // unique index (migration 036), we resolve to the canonical survivor
   // instead of falling through and creating yet another (issue #363).
-  const conversationId = await findOrCreateConversationRow(
+  const { conversationId, conversationCreated } = await findOrCreateConversationRow(
     db,
     accountId,
     contactId,
     ownerUserId
   );
 
-  return { conversationId, contactId, contactCreated };
+  return { conversationId, contactId, contactCreated, conversationCreated };
 }
 
 /**
@@ -163,7 +165,7 @@ async function findOrCreateConversationRow(
   accountId: string,
   contactId: string,
   ownerUserId: string
-): Promise<string> {
+): Promise<{ conversationId: string; conversationCreated: boolean }> {
   const { data: existing, error: findErr } = await db
     .from('conversations')
     .select('id')
@@ -178,7 +180,7 @@ async function findOrCreateConversationRow(
   }
 
   if (existing && existing.length > 0) {
-    return existing[0].id;
+    return { conversationId: existing[0].id, conversationCreated: false };
   }
 
   const { data: newConv, error: convErr } = await db
@@ -201,12 +203,12 @@ async function findOrCreateConversationRow(
         .order('created_at', { ascending: true })
         .limit(1);
       if (raced && raced.length > 0) {
-        return raced[0].id;
+        return { conversationId: raced[0].id, conversationCreated: false };
       }
     }
     console.error('[resolve-conversation] conversation create error:', convErr);
     throw new SendMessageError('db_error', 'Failed to create conversation', 500);
   }
 
-  return newConv.id;
+  return { conversationId: newConv.id, conversationCreated: true };
 }

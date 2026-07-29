@@ -7,9 +7,9 @@
 //   createBroadcast()  — validate, resolve contacts, insert the
 //                        `broadcasts` row + `broadcast_recipients`
 //                        rows (status 'pending'), return a plan.
-//   deliverBroadcast() — send each recipient's template via Meta
-//                        (phone-variant retry), stamp each recipient
-//                        row + the aggregate counts, finalize status.
+//   deliverBroadcast() — send each recipient's template via AiSensy,
+//                        stamp each recipient row + the aggregate
+//                        counts, finalize status.
 //
 // Recipient rows carry `whatsapp_message_id`, so the inbound webhook's
 // status handler (which matches on that column) updates delivered/read
@@ -18,13 +18,11 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
+import { sendTemplateMessage } from '@/lib/whatsapp/aisensy-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import {
   sanitizePhoneForMeta,
   isValidE164,
-  phoneVariants,
-  isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
 import type { MessageTemplate } from '@/types';
@@ -66,8 +64,8 @@ export interface BroadcastPlan {
   broadcastId: string;
   templateName: string;
   templateLanguage: string;
-  phoneNumberId: string;
-  accessToken: string;
+  projectId: string;
+  apiKey: string;
   templateRow: MessageTemplate | null;
   planned: PlannedRecipient[];
   /** Phones rejected up front (invalid E.164) — counted as failed. */
@@ -110,7 +108,7 @@ export async function createBroadcast(
   }
 
   // Config (fail fast + provides the audit trail owner already resolved
-  // by the caller). Meta send needs phone_number_id + decrypted token.
+  // by the caller). AiSensy send needs project_id + decrypted api_key.
   const { data: config, error: configError } = await db
     .from('whatsapp_config')
     .select('*')
@@ -123,7 +121,7 @@ export async function createBroadcast(
       400
     );
   }
-  const accessToken = decrypt(config.access_token);
+  const apiKey = decrypt(config.api_key);
 
   // Template row (once) for header/button components; guard a
   // malformed local row rather than N identical opaque failures.
@@ -238,8 +236,8 @@ export async function createBroadcast(
     broadcastId: broadcast.id,
     templateName,
     templateLanguage,
-    phoneNumberId: config.phone_number_id,
-    accessToken,
+    projectId: config.project_id,
+    apiKey,
     templateRow,
     planned,
     rejected,
@@ -247,17 +245,16 @@ export async function createBroadcast(
 }
 
 /**
- * Fan out a {@link BroadcastPlan}: send each recipient's template
- * (phone-variant retry) and stamp its `broadcast_recipients` row.
- * Best-effort per recipient — one failure never aborts the rest.
- * Designed to run inside `after()`.
+ * Fan out a {@link BroadcastPlan}: send each recipient's template and
+ * stamp its `broadcast_recipients` row. Best-effort per recipient —
+ * one failure never aborts the rest. Designed to run inside `after()`.
  *
  * The per-status count columns on `broadcasts` are owned by the DB
  * aggregate trigger (migrations 003/005): each recipient-row update
- * below advances them automatically, and later Meta delivery/read
- * webhooks keep advancing them. We therefore never write those columns
- * here — only the terminal `status` — otherwise a manual value would
- * race and clobber the trigger-maintained counts.
+ * below advances them automatically, and later delivery/read webhooks
+ * keep advancing them. We therefore never write those columns here —
+ * only the terminal `status` — otherwise a manual value would race
+ * and clobber the trigger-maintained counts.
  */
 export async function deliverBroadcast(
   db: SupabaseClient,
@@ -266,30 +263,22 @@ export async function deliverBroadcast(
   let sentCount = 0;
 
   for (const recipient of plan.planned) {
-    const variants = phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
     let lastError: string | null = null;
 
-    for (const variant of variants) {
-      try {
-        const result = await sendTemplateMessage({
-          phoneNumberId: plan.phoneNumberId,
-          accessToken: plan.accessToken,
-          to: variant,
-          templateName: plan.templateName,
-          language: plan.templateLanguage,
-          template: plan.templateRow ?? undefined,
-          params: recipient.params,
-        });
-        sentMessageId = result.messageId;
-        lastError = null;
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        lastError = message;
-        // Only a "recipient not allowed" error is worth another variant.
-        if (!isRecipientNotAllowedError(message)) break;
-      }
+    try {
+      const result = await sendTemplateMessage({
+        projectId: plan.projectId,
+        apiKey: plan.apiKey,
+        to: recipient.phone,
+        templateName: plan.templateName,
+        language: plan.templateLanguage,
+        template: plan.templateRow ?? undefined,
+        params: recipient.params,
+      });
+      sentMessageId = result.messageId;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : 'Unknown error';
     }
 
     if (sentMessageId) {
