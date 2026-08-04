@@ -49,7 +49,25 @@ export async function dispatchInboundToAiReply(
   try {
     const db = supabaseAdmin()
 
-    const config = await loadAiConfig(db, accountId)
+    // These three reads don't depend on one another — fetch them
+    // concurrently (one round trip's worth of latency instead of three)
+    // and apply the same early-out checks afterward.
+    const [{ data: config }, { data: autoResponders }, { data: conv, error: convErr }] =
+      await Promise.all([
+        loadAiConfig(db, accountId).then((c) => ({ data: c })),
+        db
+          .from('automations')
+          .select('id')
+          .eq('account_id', accountId)
+          .eq('is_active', true)
+          .in('trigger_type', ['new_message_received', 'keyword_match'])
+          .limit(1),
+        db
+          .from('conversations')
+          .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
+          .eq('id', conversationId)
+          .maybeSingle(),
+      ])
     if (!config || !config.autoReplyEnabled) return
 
     // Deterministic, user-configured responders win over the LLM — the
@@ -60,20 +78,8 @@ export async function dispatchInboundToAiReply(
     // avoid double-texting the customer. (Relationship triggers like
     // `first_inbound_message` don't count — they're not per-message
     // auto-responders.)
-    const { data: autoResponders } = await db
-      .from('automations')
-      .select('id')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
     if (autoResponders && autoResponders.length > 0) return
 
-    const { data: conv, error: convErr } = await db
-      .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
-      .eq('id', conversationId)
-      .maybeSingle()
     if (convErr || !conv) return
     if (conv.assigned_agent_id) return // a human owns this thread
     if (conv.ai_autoreply_disabled) return // handed off / turned off here
