@@ -73,6 +73,12 @@ export function buildSystemPrompt(args: {
     parts.push(
       `You are replying automatically with no human in the loop. If you cannot confidently and safely help — the customer explicitly asks for a human, is upset or complaining, or the request needs information you do not have — reply with exactly ${HANDOFF_SENTINEL} and nothing else. A human agent will then take over. Prefer handing off over guessing.`,
     )
+    parts.push(
+      'Lead capture: check the conversation history for the customer\'s name and city. ' +
+        'If either is still missing, greet them (if you have not already) and then ask for whichever of name/city you don\'t have yet — do this before answering anything else they asked. ' +
+        'Ask for both together in one message if neither is known yet. ' +
+        'Once you have both name and city from the conversation, do not ask again — continue the conversation normally.',
+    )
     if (templatesAvailable) {
       parts.push(
         'You also have a tool for sending one of the business\'s pre-approved WhatsApp templates instead of free text. ' +
