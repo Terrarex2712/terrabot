@@ -201,34 +201,21 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
 })
 
 describe('dispatchInboundToAiReply — handoff', () => {
-  it('disables auto-reply, writes a summary, and does not send on handoff', async () => {
+  it('skips the send on handoff without disabling auto-reply', async () => {
     h.generateReply.mockResolvedValue({ kind: 'handoff', usage: null })
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
     expect(h.state.rpcCalls).toHaveLength(0)
-    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
-    expect(h.state.updatePayload?.ai_handoff_summary).toContain(
-      'AI agent handed off',
-    )
-    // No handoff target configured → conversation left unassigned.
-    expect(h.state.updatePayload).not.toHaveProperty('assigned_agent_id')
+    // Auto-reply must never pause itself — only the manual "Take over"
+    // route does that.
+    expect(h.state.updatePayload).toBeNull()
   })
 
-  it('routes to the configured handoff agent on handoff', async () => {
-    h.loadAiConfig.mockResolvedValue(aiConfig({ handoffAgentId: 'agent-7' }))
-    h.generateReply.mockResolvedValue({ kind: 'handoff', usage: null })
-    await dispatchInboundToAiReply(ARGS)
-    expect(h.state.updatePayload).toMatchObject({
-      ai_autoreply_disabled: true,
-      assigned_agent_id: 'agent-7',
-    })
-  })
-
-  it('treats an empty text result the same as a handoff', async () => {
+  it('treats an empty text result the same as a handoff, still without disabling', async () => {
     h.generateReply.mockResolvedValue({ kind: 'text', text: '', usage: null })
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
-    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+    expect(h.state.updatePayload).toBeNull()
   })
 })
 

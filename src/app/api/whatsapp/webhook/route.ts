@@ -5,6 +5,7 @@ import { SendMessageError } from '@/lib/whatsapp/send-message'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import { dispatchInboundToZohoLeadConvert } from '@/lib/zoho/lead-convert'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 
 // The `after()` callback in POST runs within this route's max duration.
@@ -383,6 +384,13 @@ async function processInboundMessage(
       },
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
+
+  // Zoho CRM lead conversion — independent side effect, not a reply, so
+  // it runs unconditionally (regardless of flow/automation/AI outcome)
+  // and fire-and-forget, same idiom as the automations loop above.
+  dispatchInboundToZohoLeadConvert({ accountId, contactId, conversationId }).catch((err) =>
+    console.error('[zoho] lead-convert dispatch failed:', err),
+  )
 
   // AI auto-reply — only for plain-text inbound the flow runner did
   // NOT consume, and only when the account has enabled it.

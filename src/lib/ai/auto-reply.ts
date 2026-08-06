@@ -4,7 +4,6 @@ import { buildConversationContext } from './context'
 import { retrieveKnowledge } from './knowledge'
 import { generateReply } from './generate'
 import { buildSystemPrompt } from './defaults'
-import { buildHandoffSummary } from './handoff'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
 import { loadAiTemplateSpecs, buildTemplateTool, buildTemplateToolValidator } from './templates'
@@ -150,27 +149,13 @@ export async function dispatchInboundToAiReply(
     })
 
     if (result.kind === 'handoff' || (result.kind === 'text' && !result.text)) {
-      // The model can't (or shouldn't) answer — stop auto-replying on
-      // this thread and hand it to a human. We (a) pause the bot here
-      // (sticky until re-enabled), (b) route the conversation to the
-      // configured handoff agent — null leaves it in the shared queue —
-      // and (c) leave a short internal note so whoever picks it up has
-      // context. Assigning fires the `on_conversation_assigned` trigger,
-      // which notifies the agent.
-      const summary = buildHandoffSummary({
-        messages,
-        replyCount: conv.ai_reply_count ?? 0,
-      })
-      const update: Record<string, unknown> = {
-        ai_autoreply_disabled: true,
-        ai_handoff_summary: summary,
-      }
-      // Only set the assignee when a target is configured AND the thread
-      // isn't already owned — never stomp an existing human assignment.
-      if (config.handoffAgentId && !conv.assigned_agent_id) {
-        update.assigned_agent_id = config.handoffAgentId
-      }
-      await db.from('conversations').update(update).eq('id', conversationId)
+      // The model produced nothing usable this turn. Auto-reply must
+      // never pause itself — only a human explicitly taking over (the
+      // inbox "Take over" banner, `/api/ai/autoreply/[id]`) does that —
+      // so just skip this send and stay eligible for the next inbound.
+      console.warn(
+        `[ai auto-reply] conversation ${conversationId} produced no usable reply — skipping send.`,
+      )
       return
     }
 
