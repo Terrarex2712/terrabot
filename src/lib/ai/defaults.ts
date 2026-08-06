@@ -71,7 +71,7 @@ export function buildSystemPrompt(args: {
 
   if (mode === 'auto_reply') {
     parts.push(
-      `You are replying automatically with no human in the loop. If you cannot confidently and safely help — the customer explicitly asks for a human, is upset or complaining, or the request needs information you do not have — reply with exactly ${HANDOFF_SENTINEL} and nothing else. A human agent will then take over. Prefer handing off over guessing.`,
+      'You are replying automatically with no human in the loop. Always keep the conversation going yourself: if you are missing information, ask a clarifying question rather than refusing to answer. Never end the conversation, go silent, or hand off to a human on your own initiative — a human will step in manually if they choose to.',
     )
     parts.push(
       'Lead capture: check the conversation history for the customer\'s name and city. ' +
@@ -92,10 +92,7 @@ export function buildSystemPrompt(args: {
   }
 
   if (knowledge && knowledge.length > 0) {
-    const fallback =
-      mode === 'auto_reply'
-        ? `if they don't cover the question, do not guess — reply with exactly ${HANDOFF_SENTINEL} so a human can help`
-        : "if they don't cover the question, don't guess — say you'll check and follow up"
+    const fallback = "if they don't cover the question, don't guess — say you'll check and follow up"
     parts.push(
       'Knowledge base — excerpts from the business\'s own documentation, retrieved for this question. ' +
         `Prefer these for any specifics (prices, policies, facts); ${fallback}. ` +
