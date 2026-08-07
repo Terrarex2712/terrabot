@@ -159,3 +159,43 @@ export async function createLead(
     message: entry.message ?? 'Zoho rejected the lead.',
   }
 }
+
+/**
+ * Tag a Lead by tag name (matched against an existing tag in the
+ * module — Zoho's `add_tags` action prioritizes `id` over `name` but
+ * accepts a bare name, which resolves to the module's existing tag of
+ * that name rather than creating a new one). Best-effort from the
+ * caller's perspective: throws `ZohoError` on failure so
+ * `lead-convert.ts` can log and continue rather than let a tagging
+ * hiccup undo an already-successful lead creation.
+ */
+export async function addLeadTag(
+  creds: ZohoCredentials,
+  leadId: string,
+  tagName: string,
+): Promise<void> {
+  const { accessToken, apiDomain } = await refreshAccessToken(creds)
+
+  let res: Response
+  try {
+    res = await fetch(`${apiDomain}/crm/v8/Leads/${leadId}/actions/add_tags`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ tags: [{ name: tagName }] }),
+    })
+  } catch {
+    throw new ZohoError('Could not reach Zoho to tag the lead.', { code: 'network' })
+  }
+
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as InsertRecordsResponse | null
+    const entry = body?.data?.[0]
+    throw new ZohoError(
+      `Zoho rejected tagging the lead (status ${res.status}).`,
+      { code: entry?.code ?? 'unexpected_response', status: res.status },
+    )
+  }
+}

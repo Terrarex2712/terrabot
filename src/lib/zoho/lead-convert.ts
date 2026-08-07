@@ -1,7 +1,15 @@
 import { supabaseAdmin } from './admin-client'
 import { loadZohoConfig } from './config'
-import { createLead } from './client'
+import { createLead, addLeadTag } from './client'
 import type { ZohoLeadRuleCriteriaType } from './types'
+
+// Applied to every lead this sync creates, matching the tag accounts
+// typically set up by hand in Zoho to mark WhatsApp-sourced leads.
+// Best-effort — assumes a tag of this name already exists in the
+// Leads module (Zoho's add_tags action matches by name rather than
+// creating one); a missing tag or any other tagging failure is logged
+// and swallowed, since the lead itself is already created by this point.
+const WHATSAPP_TAG_NAME = 'Whatsapp'
 
 interface DispatchArgs {
   accountId: string
@@ -110,6 +118,14 @@ export async function dispatchInboundToZohoLeadConvert(
       .from('contacts')
       .update({ zoho_lead_id: result.leadId, zoho_lead_synced_at: new Date().toISOString() })
       .eq('id', contactId)
+
+    try {
+      await addLeadTag(config, result.leadId, WHATSAPP_TAG_NAME)
+    } catch (err) {
+      // Best-effort — the lead is already created and recorded above;
+      // a tagging failure shouldn't undo that or retry the whole sync.
+      console.warn(`[zoho lead-convert] failed to tag lead ${result.leadId}:`, err)
+    }
   } catch (err) {
     console.error('[zoho lead-convert] dispatch failed:', err)
   }

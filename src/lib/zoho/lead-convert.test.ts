@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const h = vi.hoisted(() => ({
   loadZohoConfig: vi.fn(),
   createLead: vi.fn(),
+  addLeadTag: vi.fn(),
   state: {
     contact: null as Record<string, unknown> | null,
     rules: [] as Record<string, unknown>[],
@@ -12,7 +13,7 @@ const h = vi.hoisted(() => ({
 }))
 
 vi.mock('./config', () => ({ loadZohoConfig: h.loadZohoConfig }))
-vi.mock('./client', () => ({ createLead: h.createLead }))
+vi.mock('./client', () => ({ createLead: h.createLead, addLeadTag: h.addLeadTag }))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -90,10 +91,11 @@ beforeEach(() => {
   h.state.updatePayload = null
   h.loadZohoConfig.mockResolvedValue(zohoConfig())
   h.createLead.mockResolvedValue({ ok: true, leadId: 'zoho-lead-1' })
+  h.addLeadTag.mockResolvedValue(undefined)
 })
 
 describe('dispatchInboundToZohoLeadConvert', () => {
-  it('converts on a keyword match found in an earlier (not latest) message', async () => {
+  it('converts on a keyword match found in an earlier (not latest) message, and tags the lead', async () => {
     await dispatchInboundToZohoLeadConvert(ARGS)
 
     expect(h.createLead).toHaveBeenCalledWith(
@@ -102,6 +104,13 @@ describe('dispatchInboundToZohoLeadConvert', () => {
     )
     expect(h.state.updatePayload).toMatchObject({ zoho_lead_id: 'zoho-lead-1' })
     expect(h.state.updatePayload?.zoho_lead_synced_at).toBeTruthy()
+    expect(h.addLeadTag).toHaveBeenCalledWith(zohoConfig(), 'zoho-lead-1', 'Whatsapp')
+  })
+
+  it('still records the conversion when tagging fails', async () => {
+    h.addLeadTag.mockRejectedValue(new Error('tag not found'))
+    await expect(dispatchInboundToZohoLeadConvert(ARGS)).resolves.toBeUndefined()
+    expect(h.state.updatePayload).toMatchObject({ zoho_lead_id: 'zoho-lead-1' })
   })
 
   it('skips when the contact is already converted', async () => {

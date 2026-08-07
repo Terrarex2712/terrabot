@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { refreshAccessToken, testConnection, createLead } from './client'
+import { refreshAccessToken, testConnection, createLead, addLeadTag } from './client'
 import { ZohoError } from './types'
 import type { ZohoCredentials } from './types'
 
@@ -139,5 +139,36 @@ describe('createLead', () => {
         .mockRejectedValueOnce(new Error('ECONNRESET')),
     )
     await expect(createLead(CREDS, { lastName: 'Sharma' })).rejects.toBeInstanceOf(ZohoError)
+  })
+})
+
+describe('addLeadTag', () => {
+  it('posts the tag name to the add_tags action for the lead', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({ access_token: 'tok', api_domain: 'https://www.zohoapis.in' }),
+      )
+      .mockResolvedValueOnce(okResponse({ data: [{ status: 'success', code: 'SUCCESS' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await addLeadTag(CREDS, 'lead-123', 'Whatsapp')
+
+    const [tagUrl, tagOpts] = fetchMock.mock.calls[1]
+    expect(tagUrl).toBe('https://www.zohoapis.in/crm/v8/Leads/lead-123/actions/add_tags')
+    expect(JSON.parse(tagOpts.body)).toEqual({ tags: [{ name: 'Whatsapp' }] })
+  })
+
+  it('throws a ZohoError when Zoho rejects the tag request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({ access_token: 'tok', api_domain: 'https://www.zohoapis.in' }),
+        )
+        .mockResolvedValueOnce(errResponse(400, { data: [{ code: 'INVALID_DATA' }] })),
+    )
+    await expect(addLeadTag(CREDS, 'lead-123', 'Whatsapp')).rejects.toBeInstanceOf(ZohoError)
   })
 })
