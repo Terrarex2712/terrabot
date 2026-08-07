@@ -55,6 +55,10 @@ export async function refreshAccessToken(
 
 interface OrgResponse {
   org?: { company_name?: string }[]
+  // Present instead of `org` when Zoho rejects the request outright
+  // (e.g. a missing scope) rather than returning an empty org list.
+  code?: string
+  message?: string
 }
 
 /** "Test connection" — refreshes a token, then confirms it works by
@@ -79,9 +83,13 @@ export async function testConnection(
   const body = (await res.json().catch(() => null)) as OrgResponse | null
   const companyName = body?.org?.[0]?.company_name
   if (!res.ok || !companyName) {
+    // Surface Zoho's own explanation when it gave one (e.g.
+    // OAUTH_SCOPE_MISMATCH when the refresh token wasn't granted
+    // `ZohoCRM.org.READ`) instead of just a bare HTTP status.
+    const detail = body?.message ? ` — ${body.message} (${body.code})` : ''
     throw new ZohoError(
-      `Zoho rejected the connection test (status ${res.status}).`,
-      { code: 'unexpected_response', status: res.status },
+      `Zoho rejected the connection test (status ${res.status})${detail}.`,
+      { code: body?.code ?? 'unexpected_response', status: res.status },
     )
   }
 
