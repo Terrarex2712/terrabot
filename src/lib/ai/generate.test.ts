@@ -63,6 +63,35 @@ describe('parseGeneration', () => {
     ).toEqual({ kind: 'handoff', usage: null })
   })
 
+  it('extracts and strips a [[LEAD:...]] marker', () => {
+    const res = parseGeneration({
+      text: 'Nice to meet you, Ramesh! [[LEAD:{"name":"Ramesh","city":"Jaunpur"}]]',
+      usage: null,
+    })
+    expect(res).toEqual({
+      kind: 'text',
+      text: 'Nice to meet you, Ramesh!',
+      usage: null,
+      leadInfo: { name: 'Ramesh', city: 'Jaunpur' },
+    })
+  })
+
+  it('keeps whichever lead field was actually present', () => {
+    const res = parseGeneration({ text: 'Got it. [[LEAD:{"name":"Ramesh"}]]', usage: null })
+    expect(res).toMatchObject({ text: 'Got it.', leadInfo: { name: 'Ramesh' } })
+    expect(res.kind === 'text' ? res.leadInfo?.city : undefined).toBeUndefined()
+  })
+
+  it('strips a malformed [[LEAD:...]] marker without setting leadInfo', () => {
+    const res = parseGeneration({ text: 'Hi there [[LEAD:{name: Ramesh}]]', usage: null })
+    expect(res).toEqual({ kind: 'text', text: 'Hi there', usage: null, leadInfo: undefined })
+  })
+
+  it('has no leadInfo when no marker is present', () => {
+    const res = parseGeneration({ text: 'Just a normal reply.', usage: null })
+    expect(res).toEqual({ kind: 'text', text: 'Just a normal reply.', usage: null, leadInfo: undefined })
+  })
+
   it('passes usage straight through', () => {
     const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
     expect(parseGeneration({ text: 'Hi', usage })).toEqual({

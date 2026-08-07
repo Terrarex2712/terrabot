@@ -22,6 +22,16 @@ export const AI_PROVIDER_DEFAULT_MODEL: Record<AiProvider, string> = {
  */
 export const HANDOFF_SENTINEL = '[[HANDOFF]]'
 
+/**
+ * Prefix of the sentinel the model appends (in auto-reply mode) the
+ * first time it has captured both the customer's name and city, e.g.
+ * `[[LEAD:{"name":"Ramesh","city":"Jaunpur"}]]`. Parsed and stripped by
+ * `generateReply`, then persisted onto the contact — without this, the
+ * captured name/city only ever lived in the chat transcript, never on
+ * the contact record itself.
+ */
+export const LEAD_INFO_SENTINEL_PREFIX = '[[LEAD:'
+
 /** Cap on generated reply length — keeps WhatsApp replies short and
  *  bounds token spend on the caller's own key. */
 export const MAX_OUTPUT_TOKENS = 1024
@@ -77,7 +87,10 @@ export function buildSystemPrompt(args: {
       'Lead capture: check the conversation history for the customer\'s name and city. ' +
         'If either is still missing, greet them (if you have not already) and then ask for whichever of name/city you don\'t have yet — do this before answering anything else they asked. ' +
         'Ask for both together in one message if neither is known yet. ' +
-        'Once you have both name and city from the conversation, do not ask again — continue the conversation normally.',
+        'The first time you have BOTH name and city (whether you just asked, or they were already given earlier), append this exact marker to the very end of your reply, on its own, with their actual values filled in: ' +
+        `${LEAD_INFO_SENTINEL_PREFIX}{"name":"<their name>","city":"<their city>"}]] ` +
+        'It will be removed before the customer sees it — never mention it or explain it to them. ' +
+        'Only include it the one time you first have both; do not repeat it on later turns, and do not ask for name/city again once you have them — continue the conversation normally.',
     )
     if (templatesAvailable) {
       parts.push(

@@ -159,6 +159,24 @@ export async function dispatchInboundToAiReply(
       return
     }
 
+    // Persist the name/city the model just captured (see the
+    // `[[LEAD:...]]` marker in defaults.ts) onto the contact — this is
+    // the only place that ever writes it there, so e.g. the Zoho
+    // lead-conversion sync sees the customer's actual stated name
+    // rather than just their WhatsApp profile name. Best-effort and
+    // isolated in its own try/catch: a write hiccup here must never
+    // cost the customer their reply.
+    if (result.kind === 'text' && (result.leadInfo?.name || result.leadInfo?.city)) {
+      try {
+        const patch: Record<string, string> = {}
+        if (result.leadInfo.name) patch.name = result.leadInfo.name
+        if (result.leadInfo.city) patch.city = result.leadInfo.city
+        await db.from('contacts').update(patch).eq('id', contactId)
+      } catch (err) {
+        console.warn('[ai auto-reply] failed to persist captured name/city:', err)
+      }
+    }
+
     // Atomically claim a reply slot: the cap check + increment happen in
     // one UPDATE, so concurrent inbounds can never overshoot the cap. If
     // another inbound just took the last slot, `claimed` is false and we

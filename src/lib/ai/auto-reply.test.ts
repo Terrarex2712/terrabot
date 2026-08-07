@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
     autoResponders: [] as { id: string }[],
     claim: true as boolean,
     updatePayload: null as Record<string, unknown> | null,
+    contactUpdatePayload: null as Record<string, unknown> | null,
     rpcCalls: [] as { name: string; args: unknown }[],
   },
 }))
@@ -45,6 +46,14 @@ vi.mock('./admin-client', () => ({
             Promise.resolve({ data: h.state.autoResponders, error: null }),
         }
         return chain
+      }
+      if (table === 'contacts') {
+        return {
+          update: (payload: Record<string, unknown>) => {
+            h.state.contactUpdatePayload = payload
+            return { eq: () => Promise.resolve({ error: null }) }
+          },
+        }
       }
       // conversations
       return {
@@ -100,6 +109,7 @@ beforeEach(() => {
   h.state.autoResponders = []
   h.state.claim = true
   h.state.updatePayload = null
+  h.state.contactUpdatePayload = null
   h.state.rpcCalls = []
   h.loadAiConfig.mockResolvedValue(aiConfig())
   h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi' }])
@@ -216,6 +226,38 @@ describe('dispatchInboundToAiReply — handoff', () => {
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
     expect(h.state.updatePayload).toBeNull()
+  })
+})
+
+describe('dispatchInboundToAiReply — captured lead info', () => {
+  it('persists the captured name and city onto the contact', async () => {
+    h.generateReply.mockResolvedValue({
+      kind: 'text',
+      text: 'Nice to meet you!',
+      usage: null,
+      leadInfo: { name: 'Ramesh', city: 'Jaunpur' },
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.contactUpdatePayload).toEqual({ name: 'Ramesh', city: 'Jaunpur' })
+    expect(h.engineSendText).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Nice to meet you!' }),
+    )
+  })
+
+  it('only writes whichever field was actually captured', async () => {
+    h.generateReply.mockResolvedValue({
+      kind: 'text',
+      text: 'Got it.',
+      usage: null,
+      leadInfo: { name: 'Ramesh' },
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.contactUpdatePayload).toEqual({ name: 'Ramesh' })
+  })
+
+  it('does not touch the contact when no lead info was captured', async () => {
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.contactUpdatePayload).toBeNull()
   })
 })
 

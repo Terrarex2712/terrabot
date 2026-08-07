@@ -82,12 +82,20 @@ export type ToolCallValidator = (
   input: Record<string, unknown>,
 ) => { ok: true } | { ok: false; error: string }
 
+/** The customer's name/city, parsed out of the `[[LEAD:...]]` marker the
+ *  model appends once it has captured both (see `defaults.ts`). Either
+ *  field may be absent if the model's JSON only included one. */
+export interface LeadInfo {
+  name?: string
+  city?: string
+}
+
 /**
  * Outcome of a generation call — a discriminated union so callers can't
  * accidentally read `text` off a template result or vice versa.
  */
 export type GenerateResult =
-  | { kind: 'text'; text: string; usage: AiUsage | null }
+  | { kind: 'text'; text: string; usage: AiUsage | null; leadInfo?: LeadInfo }
   | { kind: 'handoff'; usage: AiUsage | null }
   | {
       kind: 'template'

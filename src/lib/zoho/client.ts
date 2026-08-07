@@ -121,7 +121,14 @@ export async function createLead(
 
   const record: Record<string, string> = { Last_Name: input.lastName }
   if (input.firstName) record.First_Name = input.firstName
-  if (input.phone) record.Phone = input.phone
+  // Sent as both — which one is the module's actual visible phone field
+  // varies by org layout (this account's Leads layout uses Mobile, not
+  // the standard Phone field); Zoho ignores whichever isn't part of
+  // the module's fields rather than erroring.
+  if (input.phone) {
+    record.Mobile = input.phone
+    record.Phone = input.phone
+  }
   if (input.city) record.City = input.city
   if (input.leadSource) record.Lead_Source = input.leadSource
 
