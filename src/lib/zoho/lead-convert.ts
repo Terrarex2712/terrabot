@@ -1,6 +1,6 @@
 import { supabaseAdmin } from './admin-client'
 import { loadZohoConfig } from './config'
-import { createLead, addLeadTag } from './client'
+import { createLead, addLeadTag, updateLead } from './client'
 import type { ZohoLeadRuleCriteriaType } from './types'
 
 // Applied to every lead this sync creates, matching the tag accounts
@@ -10,6 +10,17 @@ import type { ZohoLeadRuleCriteriaType } from './types'
 // creating one); a missing tag or any other tagging failure is logged
 // and swallowed, since the lead itself is already created by this point.
 const WHATSAPP_TAG_NAME = 'Whatsapp'
+
+// Temporary marker written to `contacts.zoho_lead_id` while a create is
+// in flight, so a second inbound arriving moments later (e.g. the
+// customer's name and city landing as two quick, separate messages)
+// sees a non-null value and backs off instead of creating a second
+// Zoho lead from a duplicate read-then-write race. Recognizable (never
+// looks like a real numeric Zoho record id) so it's obvious in the DB
+// if a claim is ever seen stuck — only possible if the process crashed
+// mid-flight between claiming and resolving, which the fast, single
+// network round trip here makes rare.
+const CLAIM_SENTINEL = '__claiming__'
 
 interface DispatchArgs {
   accountId: string
@@ -97,20 +108,42 @@ export async function dispatchInboundToZohoLeadConvert(
     )
     if (!matchedRule) return
 
-    const result = await createLead(config, {
-      lastName: contactRow.name?.trim() || contactRow.phone,
-      phone: contactRow.phone,
-      city: contactRow.city ?? undefined,
-      leadSource: matchedRule.lead_source ?? undefined,
-    })
+    // Atomic claim: the UPDATE only succeeds if `zoho_lead_id` is still
+    // null at the DB level (single conditional statement, race-free
+    // even against a concurrent dispatch for the same contact) — a
+    // plain read-then-write here is exactly what produced a duplicate
+    // Zoho lead in production when two inbound messages landed close
+    // together. Losing the race means someone else is already handling
+    // this contact, so we back off.
+    const { data: claimedRows } = await db
+      .from('contacts')
+      .update({ zoho_lead_id: CLAIM_SENTINEL })
+      .eq('id', contactId)
+      .is('zoho_lead_id', null)
+      .select('id')
+    if (!claimedRows || claimedRows.length === 0) return
+
+    let result
+    try {
+      result = await createLead(config, {
+        lastName: contactRow.name?.trim() || contactRow.phone,
+        phone: contactRow.phone,
+        city: contactRow.city ?? undefined,
+        leadSource: matchedRule.lead_source ?? undefined,
+      })
+    } catch (err) {
+      await releaseClaim(db, contactId)
+      throw err
+    }
 
     if (!result.ok) {
-      // A well-formed Zoho rejection (duplicate, validation, etc.) — log
-      // and leave `zoho_lead_id` unset so the next matching inbound
-      // naturally retries.
+      // A well-formed Zoho rejection (duplicate, validation, etc.) —
+      // log, release the claim, and leave `zoho_lead_id` unset so the
+      // next matching inbound naturally retries.
       console.warn(
         `[zoho lead-convert] contact ${contactId} rejected by Zoho: ${result.code} — ${result.message}`,
       )
+      await releaseClaim(db, contactId)
       return
     }
 
@@ -128,6 +161,53 @@ export async function dispatchInboundToZohoLeadConvert(
     }
   } catch (err) {
     console.error('[zoho lead-convert] dispatch failed:', err)
+  }
+}
+
+function releaseClaim(db: ReturnType<typeof supabaseAdmin>, contactId: string) {
+  return db.from('contacts').update({ zoho_lead_id: null }).eq('id', contactId)
+}
+
+/**
+ * Correct an already-created lead's name/city — called after the AI
+ * captures the customer's real name/city, in case a lead was already
+ * created earlier from a message that predated the capture (so it went
+ * out under whatever `contacts.name` held at that moment, often still
+ * the WhatsApp profile name). No-op if the contact hasn't converted
+ * yet, or is mid-claim (`CLAIM_SENTINEL`) — the create/tag path above
+ * already sends the correct values in that case. Never throws.
+ */
+export async function syncCapturedInfoToExistingLead(args: {
+  accountId: string
+  contactId: string
+  name?: string
+  city?: string
+}): Promise<void> {
+  const { accountId, contactId, name, city } = args
+  if (!name && !city) return
+
+  try {
+    const db = supabaseAdmin()
+    const { data: contact } = await db
+      .from('contacts')
+      .select('zoho_lead_id')
+      .eq('id', contactId)
+      .maybeSingle()
+
+    const leadId = contact?.zoho_lead_id
+    if (!leadId || leadId === CLAIM_SENTINEL) return
+
+    const config = await loadZohoConfig(db, accountId)
+    if (!config) return
+
+    const result = await updateLead(config, leadId, { lastName: name, city })
+    if (!result.ok) {
+      console.warn(
+        `[zoho lead-convert] Zoho rejected updating lead ${leadId}: ${result.code} — ${result.message}`,
+      )
+    }
+  } catch (err) {
+    console.warn(`[zoho lead-convert] failed to sync captured name/city to lead:`, err)
   }
 }
 

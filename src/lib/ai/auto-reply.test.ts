@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   buildTemplateTool: vi.fn(),
   buildTemplateToolValidator: vi.fn(),
   sendAiTemplateReply: vi.fn(),
+  syncCapturedInfoToExistingLead: vi.fn(),
   state: {
     conv: null as Record<string, unknown> | null,
     autoResponders: [] as { id: string }[],
@@ -33,6 +34,9 @@ vi.mock('./templates', () => ({
   buildTemplateToolValidator: h.buildTemplateToolValidator,
 }))
 vi.mock('./send-template', () => ({ sendAiTemplateReply: h.sendAiTemplateReply }))
+vi.mock('@/lib/zoho/lead-convert', () => ({
+  syncCapturedInfoToExistingLead: h.syncCapturedInfoToExistingLead,
+}))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -120,6 +124,7 @@ beforeEach(() => {
   h.buildTemplateTool.mockReturnValue({ name: 'send_whatsapp_template', description: 'd', inputSchema: {} })
   h.buildTemplateToolValidator.mockReturnValue(() => ({ ok: true }))
   h.sendAiTemplateReply.mockResolvedValue({ whatsapp_message_id: 'm2' })
+  h.syncCapturedInfoToExistingLead.mockResolvedValue(undefined)
 })
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
@@ -242,6 +247,14 @@ describe('dispatchInboundToAiReply — captured lead info', () => {
     expect(h.engineSendText).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'Nice to meet you!' }),
     )
+    // Self-heal: in case a lead was already created earlier this same
+    // turn (or an earlier message) with a stale name/city.
+    expect(h.syncCapturedInfoToExistingLead).toHaveBeenCalledWith({
+      accountId: 'acct-1',
+      contactId: 'contact-1',
+      name: 'Ramesh',
+      city: 'Jaunpur',
+    })
   })
 
   it('only writes whichever field was actually captured', async () => {
@@ -258,6 +271,7 @@ describe('dispatchInboundToAiReply — captured lead info', () => {
   it('does not touch the contact when no lead info was captured', async () => {
     await dispatchInboundToAiReply(ARGS)
     expect(h.state.contactUpdatePayload).toBeNull()
+    expect(h.syncCapturedInfoToExistingLead).not.toHaveBeenCalled()
   })
 })
 

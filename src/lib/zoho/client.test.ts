@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { refreshAccessToken, testConnection, createLead, addLeadTag } from './client'
+import { refreshAccessToken, testConnection, createLead, addLeadTag, updateLead } from './client'
 import { ZohoError } from './types'
 import type { ZohoCredentials } from './types'
 
@@ -170,5 +170,64 @@ describe('addLeadTag', () => {
         .mockResolvedValueOnce(errResponse(400, { data: [{ code: 'INVALID_DATA' }] })),
     )
     await expect(addLeadTag(CREDS, 'lead-123', 'Whatsapp')).rejects.toBeInstanceOf(ZohoError)
+  })
+})
+
+describe('updateLead', () => {
+  it('PUTs only the fields that were provided', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        okResponse({ access_token: 'tok', api_domain: 'https://www.zohoapis.in' }),
+      )
+      .mockResolvedValueOnce(okResponse({ data: [{ status: 'success' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await updateLead(CREDS, 'lead-123', { lastName: 'Sailesh Kumar Yadav', city: 'Jaunpur' })
+
+    expect(res).toEqual({ ok: true, leadId: 'lead-123' })
+    const [url, opts] = fetchMock.mock.calls[1]
+    expect(url).toBe('https://www.zohoapis.in/crm/v8/Leads/lead-123')
+    expect(opts.method).toBe('PUT')
+    expect(JSON.parse(opts.body)).toEqual({
+      data: [{ Last_Name: 'Sailesh Kumar Yadav', City: 'Jaunpur' }],
+    })
+  })
+
+  it('skips the network call entirely when there is nothing to update', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const res = await updateLead(CREDS, 'lead-123', {})
+    expect(res).toEqual({ ok: true, leadId: 'lead-123' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns ok:false on a well-formed Zoho rejection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({ access_token: 'tok', api_domain: 'https://www.zohoapis.in' }),
+        )
+        .mockResolvedValueOnce(
+          okResponse({ data: [{ status: 'error', code: 'INVALID_DATA', message: 'bad field' }] }),
+        ),
+    )
+    const res = await updateLead(CREDS, 'lead-123', { city: 'Jaunpur' })
+    expect(res).toEqual({ ok: false, code: 'INVALID_DATA', message: 'bad field' })
+  })
+
+  it('throws a ZohoError on a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          okResponse({ access_token: 'tok', api_domain: 'https://www.zohoapis.in' }),
+        )
+        .mockRejectedValueOnce(new Error('ECONNRESET')),
+    )
+    await expect(updateLead(CREDS, 'lead-123', { city: 'Jaunpur' })).rejects.toBeInstanceOf(ZohoError)
   })
 })

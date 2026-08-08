@@ -385,15 +385,14 @@ async function processInboundMessage(
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
 
-  // Zoho CRM lead conversion — independent side effect, not a reply, so
-  // it runs unconditionally (regardless of flow/automation/AI outcome)
-  // and fire-and-forget, same idiom as the automations loop above.
-  dispatchInboundToZohoLeadConvert({ accountId, contactId, conversationId }).catch((err) =>
-    console.error('[zoho] lead-convert dispatch failed:', err),
-  )
-
   // AI auto-reply — only for plain-text inbound the flow runner did
-  // NOT consume, and only when the account has enabled it.
+  // NOT consume, and only when the account has enabled it. Awaited
+  // (and run) BEFORE the Zoho check below: if this message is the one
+  // where the AI captures the customer's name/city, that write to
+  // `contacts` needs to land first — otherwise Zoho lead-convert can
+  // read the stale pre-capture name for this same inbound (already
+  // happened once in production: a lead went out under the WhatsApp
+  // profile name moments before the real name was saved).
   if (!flowConsumed && !interactiveReplyId && (contentText ?? '').trim()) {
     await dispatchInboundToAiReply({
       accountId,
@@ -402,6 +401,13 @@ async function processInboundMessage(
       configOwnerUserId,
     })
   }
+
+  // Zoho CRM lead conversion — independent side effect, not a reply, so
+  // it runs unconditionally (regardless of flow/automation/AI outcome)
+  // and fire-and-forget, same idiom as the automations loop above.
+  dispatchInboundToZohoLeadConvert({ accountId, contactId, conversationId }).catch((err) =>
+    console.error('[zoho] lead-convert dispatch failed:', err),
+  )
 
   await dispatchWebhookEvent(db, accountId, 'message.received', {
     conversation_id: conversationId,

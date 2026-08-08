@@ -10,6 +10,7 @@ import { loadAiTemplateSpecs, buildTemplateTool, buildTemplateToolValidator } fr
 import { sendAiTemplateReply } from './send-template'
 import { engineSendText } from '@/lib/flows/meta-send'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
+import { syncCapturedInfoToExistingLead } from '@/lib/zoho/lead-convert'
 
 interface DispatchArgs {
   /** Tenancy key — drives config, contact, and whatsapp_config lookups. */
@@ -175,6 +176,18 @@ export async function dispatchInboundToAiReply(
       } catch (err) {
         console.warn('[ai auto-reply] failed to persist captured name/city:', err)
       }
+
+      // A Zoho lead may already exist from an earlier message that
+      // predated this capture (created with whatever `contacts.name`
+      // held at that moment — often still the WhatsApp profile name).
+      // Fire-and-forget: never worth delaying the customer's reply for,
+      // and the function itself never throws.
+      void syncCapturedInfoToExistingLead({
+        accountId,
+        contactId,
+        name: result.leadInfo.name,
+        city: result.leadInfo.city,
+      })
     }
 
     // Atomically claim a reply slot: the cap check + increment happen in

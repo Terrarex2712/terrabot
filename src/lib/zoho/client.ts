@@ -167,6 +167,65 @@ export async function createLead(
   }
 }
 
+/** Fields that can be corrected on an already-created Lead — currently
+ *  just the two the AI's later-arriving name/city capture can fix. */
+export interface ZohoLeadUpdateInput {
+  lastName?: string
+  city?: string
+}
+
+/**
+ * Correct an already-created Lead's name/city. Used when the customer's
+ * real name/city is captured by the AI *after* a lead was already
+ * created from an earlier message (whatever `contacts.name` held at
+ * that moment — often still the WhatsApp profile name) — this is the
+ * self-heal step that fixes it up rather than leaving it stale forever.
+ * Same `{ok:false}` vs thrown-`ZohoError` split as `createLead`.
+ * Requires the `ZohoCRM.modules.leads.UPDATE` scope.
+ */
+export async function updateLead(
+  creds: ZohoCredentials,
+  leadId: string,
+  input: ZohoLeadUpdateInput,
+): Promise<CreateLeadResult> {
+  const record: Record<string, string> = {}
+  if (input.lastName) record.Last_Name = input.lastName
+  if (input.city) record.City = input.city
+  if (Object.keys(record).length === 0) return { ok: true, leadId }
+
+  const { accessToken, apiDomain } = await refreshAccessToken(creds)
+
+  let res: Response
+  try {
+    res = await fetch(`${apiDomain}/crm/v8/Leads/${leadId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ data: [record] }),
+    })
+  } catch {
+    throw new ZohoError('Could not reach Zoho to update the lead.', { code: 'network' })
+  }
+
+  const body = (await res.json().catch(() => null)) as InsertRecordsResponse | null
+  const entry = body?.data?.[0]
+  if (!entry) {
+    throw new ZohoError(
+      `Zoho returned an unexpected response updating the lead (status ${res.status}).`,
+      { code: 'unexpected_response', status: res.status },
+    )
+  }
+
+  if (entry.status === 'success') return { ok: true, leadId }
+  return {
+    ok: false,
+    code: entry.code ?? 'unknown_error',
+    message: entry.message ?? 'Zoho rejected the update.',
+  }
+}
+
 /**
  * Tag a Lead by tag name (matched against an existing tag in the
  * module — Zoho's `add_tags` action prioritizes `id` over `name` but
